@@ -1,3 +1,14 @@
+# 5.6.0-pre.3--kiloOhm.1
+
+Fork release based on upstream `5.6.0-pre.3`.
+
+## Fork changes
+
+- feat: added Parquet modular encryption support for reading and writing, including encrypted and plaintext footer modes, AES-GCM and AES-GCM-CTR variants, AAD prefix handling, footer signing/encryption keys, column-specific keys, and interoperability coverage with parquet-mr inspector fixtures.
+- feat: added split-block bloom filter support for writing, reading, and equality pruning, with end-to-end and spec-compliance test coverage.
+- chore: renamed published NuGet packages to `kiloOhm.Parquet.Net` and `kiloOhm.Parquet.Net.Data.Analysis` for forked distribution.
+- fix: updated BYTE_STREAM_SPLIT decoding to consume `ReadOnlySpan<byte>` and added the hashing dependency required by the new bloom filter implementation.
+
 # 5.6.0-pre.3
 
 - BREAKING CHANGE: To enable further evolution, like Spans, direct memory access, SIMD support and so on, I am dropping support for .NET Standard. The minimum supported version of .NET is .NET 8. Supporting anything lower would require a lot of effort which I can't give you.
