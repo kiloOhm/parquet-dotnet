@@ -124,7 +124,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
 
         byte[]? aadPrefixBytes = _formatOptions.AADPrefix is null
             ? null
-            : System.Text.Encoding.ASCII.GetBytes(_formatOptions.AADPrefix);
+            : System.Text.Encoding.UTF8.GetBytes(_formatOptions.AADPrefix);
 
         bool wantsEncryptedFooter =
             !string.IsNullOrWhiteSpace(_formatOptions.FooterEncryptionKey) &&
@@ -148,6 +148,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
                 useCtrVariant: _formatOptions.UseCtrVariant
             );
             _encrypter = _encrypter ?? throw new InvalidOperationException("encrypter was not created");
+            _cryptoMeta.KeyMetadata = _formatOptions.FooterEncryptionKeyMetadata;
         }
         // PF mode → still create encrypter if any encryption is desired (column keys and/or footer-key pages).
         else if(_formatOptions.UsePlaintextFooter && (hasColumnKeys || wantsFooterKeyPagesInPF)) {
@@ -165,6 +166,9 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
                 useCtrVariant: _formatOptions.UseCtrVariant
             );
             _encrypter = _encrypter ?? throw new InvalidOperationException("encrypter was not created");
+            if(wantsFooterKeyPagesInPF) {
+                _cryptoMeta.KeyMetadata = _formatOptions.FooterEncryptionKeyMetadata;
+            }
         }
 
         // --- Build footer and write head magic ---
@@ -199,8 +203,8 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
             _signer = encTmp;                               // used later to sign the PF
             _footer.SetPlaintextFooterAlgorithm(_plaintextAlg);
 
-            if(signMeta.KeyMetadata is { Length: > 0 }) {
-                _footer.SetFooterSigningKeyMetadata(signMeta.KeyMetadata);
+            if(_formatOptions.FooterSigningKeyMetadata is { Length: > 0 }) {
+                _footer.SetFooterSigningKeyMetadata(_formatOptions.FooterSigningKeyMetadata);
             }
         }
     }

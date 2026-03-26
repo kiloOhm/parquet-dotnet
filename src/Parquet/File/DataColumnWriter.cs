@@ -161,6 +161,11 @@ class DataColumnWriter {
                 chunk.MetaData.Statistics.NullCount = null;
                 chunk.MetaData.Statistics.DistinctCount = null;
             }
+
+            if(encryptedFooterMode) {
+                // EF mode must keep column-key metadata only in encrypted_column_metadata.
+                chunk.OmitMetaDataOnWrite = true;
+            }
         }
 
         return chunk;
@@ -344,7 +349,10 @@ class DataColumnWriter {
                 _stream,
                 bloom.Filter,
                 chunk.MetaData,
-                s => new Meta.Proto.ThriftCompactProtocolWriter(s));
+                s => new Meta.Proto.ThriftCompactProtocolWriter(s),
+                encrForThisColumn,
+                _rowGroupOrdinal,
+                _columnOrdinal);
         }
 
         return r;

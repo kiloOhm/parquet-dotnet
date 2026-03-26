@@ -119,7 +119,7 @@ namespace Parquet {
                         requirePrefix = alg.AESGCMV1.SupplyAadPrefix == true;
                         aadPrefixBytes = requirePrefix
                             ? (!string.IsNullOrEmpty(aadPrefix)
-                                ? System.Text.Encoding.ASCII.GetBytes(aadPrefix!)
+                                ? System.Text.Encoding.UTF8.GetBytes(aadPrefix!)
                                 : throw new InvalidDataException("This file requires an AAD prefix to verify the footer signature."))
                             : (alg.AESGCMV1.AadPrefix ?? Array.Empty<byte>());
                     } else if(alg.AESGCMCTRV1 is not null) {
@@ -127,7 +127,7 @@ namespace Parquet {
                         requirePrefix = alg.AESGCMCTRV1.SupplyAadPrefix == true;
                         aadPrefixBytes = requirePrefix
                             ? (!string.IsNullOrEmpty(aadPrefix)
-                                ? System.Text.Encoding.ASCII.GetBytes(aadPrefix!)
+                                ? System.Text.Encoding.UTF8.GetBytes(aadPrefix!)
                                 : throw new InvalidDataException("This file requires an AAD prefix to verify the footer signature."))
                             : (alg.AESGCMCTRV1.AadPrefix ?? Array.Empty<byte>());
                     } else {

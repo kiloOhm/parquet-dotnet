@@ -100,7 +100,12 @@ namespace Parquet.File {
                 throw new ArgumentNullException(nameof(columnChunk));
             }
 
-            var findPath = new FieldPath(columnChunk.MetaData!.PathInSchema);
+            List<string>? path = columnChunk.MetaData?.PathInSchema
+                ?? columnChunk.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY?.PathInSchema;
+            if(path == null)
+                return null;
+
+            var findPath = new FieldPath(path);
             return _tree.Find(findPath)?.element;
         }
 

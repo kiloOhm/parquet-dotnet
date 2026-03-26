@@ -2464,6 +2464,12 @@ namespace Parquet.Meta {
         /// </summary>
         public byte[]? EncryptedColumnMetadata { get; set; }
 
+        /// <summary>
+        /// Internal write-time flag used for encrypted-footer files: when a column uses
+        /// a column-specific key, the plaintext meta_data must not be serialized on wire.
+        /// </summary>
+        internal bool OmitMetaDataOnWrite { get; set; }
+
 
         internal void Write(ThriftCompactProtocolWriter proto) {
             proto.StructBegin();
@@ -2475,7 +2481,7 @@ namespace Parquet.Meta {
             // 2: FileOffset, i64
             proto.WriteI64Field(2, FileOffset);
             // 3: MetaData, id
-            if(MetaData != null) {
+            if(MetaData != null && !OmitMetaDataOnWrite) {
                 proto.BeginInlineStruct(3);
                 MetaData.Write(proto);
             }

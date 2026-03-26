@@ -8,6 +8,7 @@ using CommunityToolkit.HighPerformance.Buffers;
 using Microsoft.IO;
 using Parquet.Data;
 using Parquet.Encodings;
+using Parquet.Encryption;
 using Parquet.Extensions;
 using Parquet.Meta;
 using Parquet.Meta.Proto;
@@ -685,10 +686,31 @@ namespace Parquet.File {
             long cur = _inputStream.CanSeek ? _inputStream.Position : 0;
 
             try {
-                _bloom = BloomFilterIO.ReadFromStream(
-                    _inputStream,
-                    meta,
-                    s => new ThriftCompactProtocolReader(s));
+                short columnOrdinal = (short)_rowGroup.Columns.IndexOf(_thriftColumnChunk);
+                short rowGroupOrdinal = _rowGroup.Ordinal ?? 0;
+                if(columnOrdinal < 0)
+                    throw new InvalidDataException("Could not determine column ordinal");
+
+                if(_thriftColumnChunk.CryptoMetadata is null) {
+                    _bloom = BloomFilterIO.ReadFromStream(
+                        _inputStream,
+                        meta,
+                        s => new ThriftCompactProtocolReader(s));
+                    return;
+                }
+
+                if(_footer.Decrypter is null)
+                    return;
+
+                using(ColumnKeySelection.PushKeyFor(_thriftColumnChunk, _options, _footer.Decrypter)) {
+                    _inputStream.Seek(meta.BloomFilterOffset!.Value, SeekOrigin.Begin);
+                    _bloom = BloomFilterIO.ReadEncryptedFromStream(
+                        _inputStream,
+                        _footer.Decrypter,
+                        rowGroupOrdinal,
+                        columnOrdinal,
+                        bytes => new ThriftCompactProtocolReader(new MemoryStream(bytes, writable: false)));
+                }
             } catch {
                 // Be tolerant: if bloom is corrupt/unsupported, just skip pruning.
                 _bloom = null;

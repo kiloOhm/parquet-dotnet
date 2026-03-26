@@ -148,9 +148,21 @@ namespace Parquet {
         public string? FooterEncryptionKey { get; set; }
 
         /// <summary>
+        /// Optional retrieval metadata for the footer encryption key, written to
+        /// <c>FileCryptoMetaData.key_metadata</c> in encrypted-footer mode.
+        /// </summary>
+        public byte[]? FooterEncryptionKeyMetadata { get; set; }
+
+        /// <summary>
         /// Gets or sets the key used to sign the footer when using plaintext footer mode.
         /// </summary>
         public string? FooterSigningKey { get; set; } = null;
+
+        /// <summary>
+        /// Optional retrieval metadata for the footer signing key, written to
+        /// <c>FileMetaData.footer_signing_key_metadata</c> in plaintext-footer mode.
+        /// </summary>
+        public byte[]? FooterSigningKeyMetadata { get; set; }
 
         /// <summary>
         /// Optional Additional Authentication Data Prefix used to verify the integrity of the encrypted file. Only required

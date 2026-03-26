@@ -60,7 +60,11 @@ static class ThriftExtensions {
     }
 
     public static FieldPath GetPath(this ColumnChunk columnChunk) {
-        return new FieldPath(columnChunk.MetaData!.PathInSchema);
+        if(columnChunk.MetaData?.PathInSchema != null)
+            return new FieldPath(columnChunk.MetaData.PathInSchema);
+        if(columnChunk.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY?.PathInSchema != null)
+            return new FieldPath(columnChunk.CryptoMetadata.ENCRYPTIONWITHCOLUMNKEY.PathInSchema);
+        throw new InvalidDataException("Unable to determine column path from ColumnChunk.");
     }
 
     public static string Describe(this SchemaElement se) {
