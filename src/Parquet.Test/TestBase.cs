@@ -131,6 +131,7 @@ public class TestBase {
         return new StreamReader("./data/" + name);
     }
 
+
     protected async Task<DataColumn?> WriteReadSingleColumn(DataColumn dataColumn) {
         using var ms = new MemoryStream();
         // write with built-in extension method

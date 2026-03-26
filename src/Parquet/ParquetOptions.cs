@@ -101,6 +101,38 @@ namespace Parquet {
 
         internal Type DecimalType => UseBigDecimal ? typeof(BigDecimal) : typeof(decimal);
 
+        #region bloom filters
+
+        /// <summary>
+        /// Gets the bloom filter options for each column. The dictionary key is the column name,
+        /// and the value is the <see cref="BloomFilterOptions"/> for that column.
+        /// </summary>
+        public Dictionary<string, BloomFilterOptions> BloomFilterOptionsByColumn { get; set; } = new();
+
+        /// <summary>
+        /// Options for configuring bloom filters in Parquet columns.
+        /// </summary>
+        public record BloomFilterOptions {
+            /// <summary>
+            /// When set to true, enables bloom filters for columns to improve query performance by filtering out non-matching values.
+            /// </summary>
+            public bool EnableBloomFilters { get; set; } = true;
+
+            /// <summary>
+            /// False positive probability for bloom filters. This value determines the likelihood that the bloom filter will incorrectly indicate that a value is present.
+            /// Typical values are small (e.g., 0.01 for 1% false positive rate).
+            /// </summary>
+            public float BloomFilterFpp { get; set; } = 0.01f;
+
+            /// <summary>
+            /// When set, overrides the number of bits per value used in bloom filters for columns.
+            /// This allows fine-tuning of bloom filter size and performance. If not set, the default calculation is used.
+            /// </summary>
+            public int? BloomFilterBitsPerValueOverride { get; set; } = null;
+        }
+
+        #endregion bloom filters
+
         #region modular encryption
 
         /// <summary>

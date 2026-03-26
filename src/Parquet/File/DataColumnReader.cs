@@ -12,6 +12,7 @@ using Parquet.Extensions;
 using Parquet.Meta;
 using Parquet.Meta.Proto;
 using Parquet.Schema;
+using Parquet.Bloom;
 
 namespace Parquet.File {
 
@@ -29,6 +30,8 @@ namespace Parquet.File {
         private readonly RowGroup _rowGroup;
         private readonly CompressionMethod _compressionMethod;
         private static readonly RecyclableMemoryStreamManager _rmsMgr = new RecyclableMemoryStreamManager();
+        private SplitBlockBloomFilter? _bloom;
+        private bool _bloomLoaded;
 
         internal DataColumnReader(
            DataField dataField,
@@ -54,6 +57,19 @@ namespace Parquet.File {
             // parquetOptions is guaranteed non-null due to earlier null check.
             _rmsMgr.Settings.MaximumSmallPoolFreeBytes = parquetOptions.MaximumSmallPoolFreeBytes;
             _rmsMgr.Settings.MaximumLargePoolFreeBytes = parquetOptions.MaximumLargePoolFreeBytes;
+        }
+
+        /// <summary>
+        /// Returns false if the value is definitely not present in this column chunk
+        /// (per its Split-Block Bloom filter). Returns true if it might be present,
+        /// or if pruning is unavailable (no bloom / unsupported type).
+        /// Use this before reading to skip I/O for obvious misses.
+        /// </summary>
+        internal bool MightMatchEquals(object? value) {
+            if(_schemaElement == null)
+                return true; // unknown type -> don't prune
+            EnsureBloomLoaded();
+            return BloomPruning.MightMatchEquals(value, _schemaElement, _bloom);
         }
 
         /// <summary>
@@ -282,12 +298,12 @@ namespace Parquet.File {
 
         private long GetFileOffset(out bool isDictionaryPageOffset) {
             //https://stackoverflow.com/a/55226688/1458738
-            long dictionaryPageOffset = _thriftColumnChunk.MetaData?.DictionaryPageOffset ?? 0;
+            long? dictionaryPageOffset = _thriftColumnChunk.MetaData?.DictionaryPageOffset;
             long firstDataPageOffset = _thriftColumnChunk.MetaData!.DataPageOffset;
-            if(dictionaryPageOffset > 0 && dictionaryPageOffset < firstDataPageOffset) {
+            if(dictionaryPageOffset.HasValue && dictionaryPageOffset.Value < firstDataPageOffset) {
                 // if there's a dictionary and it's before the first data page, start from there
                 isDictionaryPageOffset = true;
-                return dictionaryPageOffset;
+                return dictionaryPageOffset.Value;
             }
             isDictionaryPageOffset = false;
             return firstDataPageOffset;
@@ -652,5 +668,36 @@ namespace Parquet.File {
             ReadColumn(decomp.Memory.Span, ph.DataPageHeaderV2.Encoding, maxValues, maxRead, pc);
         }
 
+        /// <summary>
+        /// Lazily loads the bloom filter from the column chunk if present.
+        /// Saves and restores the current stream position.
+        /// </summary>
+        private void EnsureBloomLoaded() {
+            if(_bloomLoaded)
+                return;
+            _bloomLoaded = true;
+
+            ColumnMetaData? meta = _thriftColumnChunk.MetaData;
+            if(meta == null || !meta.BloomFilterOffset.HasValue)
+                return; // nothing to load
+
+            // Save current read position; read bloom (unencrypted, uncompressed) and restore.
+            long cur = _inputStream.CanSeek ? _inputStream.Position : 0;
+
+            try {
+                _bloom = BloomFilterIO.ReadFromStream(
+                    _inputStream,
+                    meta,
+                    s => new ThriftCompactProtocolReader(s));
+            } catch {
+                // Be tolerant: if bloom is corrupt/unsupported, just skip pruning.
+                _bloom = null;
+            } finally {
+                if(_inputStream.CanSeek) {
+                    // restore to where page reading expects to start/continue
+                    _inputStream.Seek(cur, SeekOrigin.Begin);
+                }
+            }
+        }
     }
 }

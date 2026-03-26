@@ -3,7 +3,7 @@
     <PropertyGroup>
         <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
         <Company></Company>
-        <PackageId>Parquet.Net.Data.Analysis</PackageId>
+        <PackageId>kiloOhm.Parquet.Net.Data.Analysis</PackageId>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
