@@ -23,6 +23,7 @@ namespace Parquet.Test.Bloom {
         private static DataField F32(string name = "f") => new DataField(name, System.Type.GetType("System.Single")!);
         private static DataField F64(string name = "d") => new DataField(name, System.Type.GetType("System.Double")!);
         private static DataField STRING(string name = "s") => new DataField(name, System.Type.GetType("System.String")!);
+        private static DateTimeDataField INT96(string name = "ts") => new DateTimeDataField(name, DateTimeFormat.Impala);
         private static DataField NINT32(string name = "n") => new DataField(name, System.Type.GetType("System.Int32")!, isNullable: true);
         private static SchemaElement Physical(string name, Parquet.Meta.Type t) =>
             new SchemaElement { Name = name, Type = t, RepetitionType = FieldRepetitionType.REQUIRED };
@@ -79,6 +80,7 @@ namespace Parquet.Test.Bloom {
 
             long afterHeader = ms.Position;
             int headerSize = (int)(afterHeader - start);
+            Assert.Equal(headerSize + header.NumBytes, chunk.MetaData.BloomFilterLength);
 
             long payloadStart = ms.Position;
             ms.Position += header.NumBytes;
@@ -202,18 +204,31 @@ namespace Parquet.Test.Bloom {
                 using var ms = new MemoryStream();
                 var writer = new DataColumnWriter(ms, footer, se,
                     CompressionMethod.None, options: new ParquetOptions {
+                        UseDictionaryEncoding = false,
                         BloomFilterOptionsByColumn = new Dictionary<string, ParquetOptions.BloomFilterOptions>() {
                         { field.Name, new ParquetOptions.BloomFilterOptions { EnableBloomFilters = true } }
                     }
                     },
                     System.IO.Compression.CompressionLevel.NoCompression, null);
 
-                await writer.WriteAsync(path, new DataColumn(field, vals));
+                ColumnChunk chunk = await writer.WriteAsync(path, new DataColumn(field, vals));
 
-                ColumnChunk? chunk = footer.AddRowGroup().Columns.LastOrDefault(); // if not returned above; else keep returned chunk
-                // If your WriteAsync already returns chunk, use that instead of the line above.
+                ms.Position = 0;
+                var rg = MakeRowGroup(chunk);
+                var reader = new DataColumnReader(field, ms, chunk,
+                    new DataColumnStatistics { NullCount = 0 }, footer, parquetOptions: new ParquetOptions {
+                        BloomFilterOptionsByColumn = new Dictionary<string, ParquetOptions.BloomFilterOptions>() {
+                        { field.Name, new ParquetOptions.BloomFilterOptions { EnableBloomFilters = true } }
+                    }
+                    }, rg);
 
-                // To keep consistent with WriteAsync return, comment the above two lines and capture the chunk on write if needed.
+                Assert.True(reader.MightMatchEquals(3.1415927f));
+                Assert.True(reader.MightMatchEquals(-0.0f));
+                Assert.False(reader.MightMatchEquals(42.42f));
+
+                ms.Position = 0;
+                DataColumn rt = await reader.ReadAsync();
+                Assert.Equal(vals, (float[])rt.Data);
             }
 
             // DOUBLE
@@ -226,6 +241,7 @@ namespace Parquet.Test.Bloom {
                 using var ms = new MemoryStream();
                 var writer = new DataColumnWriter(ms, footer, se,
                     CompressionMethod.None, options: new ParquetOptions {
+                        UseDictionaryEncoding = false,
                         BloomFilterOptionsByColumn = new Dictionary<string, ParquetOptions.BloomFilterOptions>() {
                         { field.Name, new ParquetOptions.BloomFilterOptions { EnableBloomFilters = true } }
                     }
@@ -253,6 +269,46 @@ namespace Parquet.Test.Bloom {
                 DataColumn rt = await reader.ReadAsync();
                 Assert.Equal(vals, (double[])rt.Data);
             }
+        }
+
+        [Fact]
+        public async Task Int96_PlainEncoding_RoundTrip_And_Prune() {
+            DateTimeDataField field = INT96();
+            var schema = new ParquetSchema(field);
+            DateTime[] vals = {
+                new DateTime(2024, 05, 06, 07, 08, 09, DateTimeKind.Utc).AddTicks(1234567),
+                new DateTime(2024, 05, 06, 07, 08, 10, DateTimeKind.Utc).AddTicks(7654321)
+            };
+
+            (ThriftFooter footer, FieldPath path, SchemaElement se) = SetupFooter(schema, field, vals.Length, Parquet.Meta.Type.INT96);
+
+            using var ms = new MemoryStream();
+            var writer = new DataColumnWriter(ms, footer, se,
+                CompressionMethod.None, options: new ParquetOptions {
+                    BloomFilterOptionsByColumn = new Dictionary<string, ParquetOptions.BloomFilterOptions>() {
+                        { field.Name, new ParquetOptions.BloomFilterOptions { EnableBloomFilters = true } }
+                    }
+                },
+                System.IO.Compression.CompressionLevel.NoCompression, null);
+
+            ColumnChunk chunk = await writer.WriteAsync(path, new DataColumn(field, vals));
+
+            ms.Position = 0;
+            var rg = MakeRowGroup(chunk);
+            var reader = new DataColumnReader(field, ms, chunk,
+                new DataColumnStatistics { NullCount = 0 }, footer, parquetOptions: new ParquetOptions {
+                    BloomFilterOptionsByColumn = new Dictionary<string, ParquetOptions.BloomFilterOptions>() {
+                        { field.Name, new ParquetOptions.BloomFilterOptions { EnableBloomFilters = true } }
+                    }
+                }, rg);
+
+            Assert.True(reader.MightMatchEquals(vals[0]));
+            Assert.True(reader.MightMatchEquals(vals[1]));
+            Assert.False(reader.MightMatchEquals(vals[1].AddTicks(1)));
+
+            ms.Position = 0;
+            DataColumn rt = await reader.ReadAsync();
+            Assert.Equal(vals, (DateTime[])rt.Data);
         }
 
         /// <summary>

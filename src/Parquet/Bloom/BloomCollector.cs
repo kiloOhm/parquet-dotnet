@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers.Binary;
 using System.Text;
+using Parquet.Data;
 
 namespace Parquet.Bloom
 {
@@ -52,19 +53,8 @@ namespace Parquet.Bloom
             if(!v.HasValue)
                 return;
 
-            // Parquet INT96 is a 12-byte little-endian value consisting of:
-            // - first 8 bytes: nanoseconds since midnight (little-endian)
-            // - next 4 bytes: Julian day (little-endian)
-
-            DateTime dt = v.Value.ToUniversalTime();
-            int julianDay = (int)(dt - new DateTime(4713, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalDays + 1721424; // Convert to Julian Day
-            long nanosSinceMidnight = (long)(dt - dt.Date).TotalMilliseconds * 1_000_000; // Convert to nanoseconds since midnight
-
-            byte[] buf = new byte[12];
-            BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(0, 8), nanosSinceMidnight);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8, 4), julianDay);
-
-            Filter.Insert(buf);
+            // Reuse the exact INT96 PLAIN encoding used by the data writer.
+            Filter.Insert(new NanoTime(v.Value.ToUniversalTime()).GetBytes());
         }
 
         /// <summary>Insert a nullable float (PLAIN little-endian 4 bytes, IEEE 754).</summary>

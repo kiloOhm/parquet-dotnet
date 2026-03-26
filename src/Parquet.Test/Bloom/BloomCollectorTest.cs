@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Linq;
 using Parquet.Bloom;
+using Parquet.Data;
 using Xunit;
 using Encoding = System.Text.Encoding;
 
@@ -92,6 +93,17 @@ namespace Parquet.Test.Bloom {
             byte[] after = viaCollector.Filter.ToByteArray();
 
             Assert.Equal(before, after);
+        }
+
+        [Fact]
+        public void AddInt96_Uses_Exact_NanoTime_Plain_Bytes() {
+            int blocks = 32;
+            var viaCollector = new BloomCollector(blocks);
+            DateTime value = new DateTime(2024, 05, 06, 07, 08, 09, DateTimeKind.Utc).AddTicks(1234567);
+
+            viaCollector.AddInt96(value);
+
+            Assert.True(viaCollector.Filter.MightContain(new NanoTime(value).GetBytes()));
         }
     }
 }
