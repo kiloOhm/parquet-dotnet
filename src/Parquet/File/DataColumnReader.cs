@@ -298,14 +298,13 @@ namespace Parquet.File {
         }
 
         private long GetFileOffset(out bool isDictionaryPageOffset) {
-            //https://stackoverflow.com/a/55226688/1458738
             long? dictionaryPageOffset = _thriftColumnChunk.MetaData?.DictionaryPageOffset;
             long firstDataPageOffset = _thriftColumnChunk.MetaData!.DataPageOffset;
-            if(dictionaryPageOffset.HasValue && dictionaryPageOffset.Value < firstDataPageOffset) {
-                // if there's a dictionary and it's before the first data page, start from there
+            if(dictionaryPageOffset.HasValue && dictionaryPageOffset.Value <= firstDataPageOffset) {
                 isDictionaryPageOffset = true;
                 return dictionaryPageOffset.Value;
             }
+
             isDictionaryPageOffset = false;
             return firstDataPageOffset;
         }

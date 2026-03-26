@@ -19,12 +19,7 @@ namespace Parquet {
         }
 
         public static DateTime AsUnixMillisecondsInDateTime(this long unixMilliseconds) {
-            try {
-                //TODO: Remove this try/catch
-                return UnixEpoch.AddMilliseconds(unixMilliseconds);
-            } catch(Exception) {
-                return DateTime.Now;
-            }
+            return UnixEpoch.AddMilliseconds(unixMilliseconds);
         }
 
         public static long ToUnixMilliseconds(this DateTime dto) {
