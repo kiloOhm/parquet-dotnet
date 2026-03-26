@@ -1,3 +1,15 @@
+# 5.6.0-pre.3--kiloOhm.2
+
+Fork release based on upstream changes merged after `5.6.0-pre.3--kiloOhm.1`.
+
+## Fork changes
+
+- chore: merged latest upstream `aloneguid/master` changes into the fork.
+- feat: pulled in upstream schema decoding improvements that prioritise logical type metadata when reading files.
+- fix: pulled in upstream Zstd page decompression handling for files with incorrect `UncompressedPageSize` metadata.
+- chore: kept fork modular encryption and split-block bloom filter support aligned while resolving the upstream merge.
+- chore: retained forked package naming and release/versioning flow based on `docs/release-notes.md`.
+
 # 5.6.0-pre.3--kiloOhm.1
 
 Fork release based on upstream `5.6.0-pre.3`.
