@@ -73,6 +73,8 @@ namespace Parquet.Serialization {
 
             public ParquetTimestampAttribute? TimestampAttribute => _mi.GetCustomAttribute<ParquetTimestampAttribute>();
 
+            public ParquetTimeSpanAttribute? TimeSpanAttribute => _mi.GetCustomAttribute<ParquetTimeSpanAttribute>();
+
             public ParquetMicroSecondsTimeAttribute? MicroSecondsTimeAttribute => _mi.GetCustomAttribute<ParquetMicroSecondsTimeAttribute>();
 
             public ParquetDecimalAttribute? DecimalAttribute => _mi.GetCustomAttribute<ParquetDecimalAttribute>();
@@ -139,11 +141,12 @@ namespace Parquet.Serialization {
             return members;
         }
 
-        private static Field ConstructDataField(string name, string propertyName, Type t, ClassMember? member) {
+        private static Field ConstructDataField(string name, string propertyName, Type t, ClassMember? member, bool? isNullableOverride = null) {
             Field r;
-            bool? isNullable = member == null
-                ? null
-                : member.IsRequired ? false : t.IsNullable();
+            bool? isNullable = isNullableOverride
+                ?? (member == null
+                    ? null
+                    : member.IsRequired ? false : t.IsNullable());
 
             if(t == typeof(DateTime) || t == typeof(DateTime?)) {
                 ParquetTimestampAttribute? tsa = member?.TimestampAttribute;
@@ -153,11 +156,14 @@ namespace Parquet.Serialization {
                     unit: tsa?.Resolution.Convert(),
                     isNullable: t == typeof(DateTime?), null, propertyName);
             } else if(t == typeof(TimeSpan) || t == typeof(TimeSpan?)) {
+                ParquetTimeSpanAttribute? tsa = member?.TimeSpanAttribute;
                 r = new TimeSpanDataField(name,
                     member?.MicroSecondsTimeAttribute == null
                         ? TimeSpanFormat.MilliSeconds
                         : TimeSpanFormat.MicroSeconds,
-                    t == typeof(TimeSpan?), null, propertyName);
+                    t == typeof(TimeSpan?), null, propertyName) {
+                    IsAdjustedToUTC = tsa == null ? true : tsa.IsAdjustedToUTC
+                };
 #if NET6_0_OR_GREATER
             } else if(t == typeof(TimeOnly) || t == typeof(TimeOnly?)) {
                 r = new TimeOnlyDataField(name,
@@ -255,12 +261,16 @@ namespace Parquet.Serialization {
             bool forWriting) {
 
             Type baseType = t.IsNullable() ? t.GetNonNullable() : t;
+            bool isLegacyRepeatable = false;
             if(member != null && member.IsLegacyRepeatable && !baseType.IsGenericIDictionary() && baseType.TryExtractIEnumerableType(out Type? bti)) {
                 baseType = bti!;
+                isLegacyRepeatable = true;
             }
 
             if(SchemaEncoder.IsSupported(baseType)) {
-                return ConstructDataField(columnName, propertyName, t, member);
+                return ConstructDataField(columnName, propertyName,
+                    isLegacyRepeatable ? baseType.MakeArrayType() : t, member,
+                    isLegacyRepeatable ? baseType.IsNullable() : null);
             } else if(t.TryExtractDictionaryType(out Type? tKey, out Type? tValue)) {
                 return ConstructMapField(columnName, propertyName, tKey!, tValue!, forWriting);
             } else if(t.TryExtractIEnumerableType(out Type? elementType)) {

@@ -8,6 +8,8 @@ using Parquet.Serialization;
 using Parquet.Underfloor;
 using static Grey.App;
 
+#pragma warning disable CS4014
+
 // global state
 WorkFile fd = await WorkFile.CreateAsync(null);
 
@@ -37,7 +39,7 @@ async Task LoadAsync(string path) {
 }
 
 void LoadFromFile(string path) {
-    LoadAsync(path).Forget();
+    LoadAsync(path);
 }
 
 if(args.Length == 0) {
@@ -120,7 +122,7 @@ string FormatLogicalType(LogicalType? lt) {
 
 void RenderRawSchema(List<SchemaElement> schemaElements) {
     Table("schema",
-    ["name", "num children", "type", "type length", "repetition", "logical type", "converted type", "scale", "precision", "field id"],
+    ["name", "num children", "type", "type length", "repetition", "logical type", "converted type", "precision", "scale", "field id"],
     t => {
         foreach(SchemaElement se in schemaElements) {
             t.BeginRow();
@@ -146,9 +148,9 @@ void RenderRawSchema(List<SchemaElement> schemaElements) {
             t.NextColumn();
             Label(se.ConvertedType?.ToString() ?? "");
             t.NextColumn();
-            Label(se.Scale?.ToString() ?? "");
-            t.NextColumn();
             Label(se.Precision?.ToString() ?? "");
+            t.NextColumn();
+            Label(se.Scale?.ToString() ?? "");
             t.NextColumn();
             Label(se.FieldId?.ToString() ?? "");
         }
@@ -279,9 +281,9 @@ void RenderMetadata() {
                     ta.NextColumn();
                     Label(rg.RowGroup.FileOffset?.ToString() ?? "");
                     ta.NextColumn();
-                    Label(rg.RowGroup.TotalByteSize.ToFileSizeUiString());
+                    Label(rg.RowGroup.TotalByteSize.UISize());
                     ta.NextColumn();
-                    Label((rg.RowGroup.TotalCompressedSize ?? 0).ToFileSizeUiString());
+                    Label((rg.RowGroup.TotalCompressedSize ?? 0).UISize());
 
                     if(isOpen) {
                         int idx1 = 0;
@@ -296,9 +298,9 @@ void RenderMetadata() {
                             ta.NextColumn();
                             Label(cc.FileOffset == 0 ? "" : cc.FileOffset.ToString());
                             ta.NextColumn();
-                            Label(cc.MetaData?.TotalUncompressedSize.ToFileSizeUiString() ?? "");
+                            Label(cc.MetaData?.TotalUncompressedSize.UISize() ?? "");
                             ta.NextColumn();
-                            Label(cc.MetaData?.TotalCompressedSize.ToFileSizeUiString() ?? "");
+                            Label(cc.MetaData?.TotalCompressedSize.UISize() ?? "");
                             ta.NextColumn();
                             Label(cc.MetaData?.Codec.ToString() ?? "");
                             ta.NextColumn();
@@ -346,6 +348,7 @@ void RenderStatusBar() {
     SBI(Icon.Table_rows, fd.RowGroupCountDisplay, "number of row groups");
     SBI(Icon.View_column, fd.ColumnCountDisplay, "number of columns");
     SBI(Icon.Numbers, fd.VersionDisplay, "format version");
+    SBI(Icon.Timelapse, fd.SampleReadDurationDisplay, "data sample read duration");
 }
 
 #endregion
@@ -439,14 +442,8 @@ void RenderData() {
     if(fd.Metadata == null || fd.Columns == null || fd.ColumnsDisplay == null || fd.Schema == null)
         return;
 
-    if(fd.SampleReadStatus != ReadStatus.Completed) {
-        Label(fd.SampleReadStatus.ToString(), Emphasis.Info);
-    } else {
-        Label(fd.SampleReadDurationDisplay ?? "");
-    }
-
     if(fd.SampleReadStatus == ReadStatus.NotStarted) {
-        fd.ReadDataSampleAsync().Forget();
+        fd.ReadDataSampleAsync();
         return;
     }
 
@@ -488,7 +485,7 @@ void RenderRawColumnData() {
 
     Combo("column", fd.RawDataFieldsPaths, ref fd.CurrentRawDataFieldIndex);
     if(Button("read", Emphasis.Primary)) {
-        fd.ReadRawDataFieldAsync().Forget();
+        fd.ReadRawDataFieldAsync();
     }
 
     if(fd.CurrentRawDataFieldData != null) {
@@ -560,3 +557,5 @@ Run(title, () => {
 
     return true;
 }, isScrollable: false);
+
+#pragma warning restore CS4014

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data;
+using Parquet.Data;
 
 namespace Parquet {
     /// <summary>
@@ -93,6 +94,13 @@ namespace Parquet {
         /// </summary>
         public int MaximumLargePoolFreeBytes { get; set; } = 64 * 1024 * 1024;
 
+        /// <summary>
+        /// When true, decimals will be read and written as <see cref="BigDecimal"/> instead of <see cref="decimal"/>. This is required if you are working with truly large decimals.
+        /// </summary>
+        public bool UseBigDecimal { get; set; } = false;
+
+        internal Type DecimalType => UseBigDecimal ? typeof(BigDecimal) : typeof(decimal);
+
         #region modular encryption
 
         /// <summary>
@@ -114,7 +122,7 @@ namespace Parquet {
 
         /// <summary>
         /// Optional Additional Authentication Data Prefix used to verify the integrity of the encrypted file. Only required
-        /// if the file was encrypted with an AAD Prefix *and* the prefix wasn't embedded into the 
+        /// if the file was encrypted with an AAD Prefix *and* the prefix wasn't embedded into the
         /// file by the author.
         /// </summary>
         /// <remarks>Currently only used by <see cref="ParquetReader"/></remarks>
@@ -155,8 +163,6 @@ namespace Parquet {
         /// </para>
         /// </remarks>
         public bool UseCtrVariant { get; set; } = false;
-
-        // ParquetOptions.cs
 
         /// <summary>
         /// Specifies a column encryption key and optional key metadata for Parquet modular encryption.

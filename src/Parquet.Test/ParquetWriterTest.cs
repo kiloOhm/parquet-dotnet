@@ -1,11 +1,14 @@
 ﻿using System;
-using Parquet.Data;
-using System.IO;
-using Xunit;
 using System.Collections.Generic;
-using System.Threading.Tasks;
-using Parquet.Schema;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
+using Parquet.Data;
+using Parquet.Schema;
+using Parquet.Serialization;
+using Parquet.Test.Util;
+using Xunit;
 
 namespace Parquet.Test {
     public class ParquetWriterTest : TestBase {
@@ -250,6 +253,24 @@ namespace Parquet.Test {
         }
 
         [Fact]
+        public async Task Column_writes_do_not_flush_underlying_stream_before_file_is_finalized() {
+            var id = new DataField<int>("id");
+            var inner = new MemoryStream();
+            var counting = new FlushCountingStream(inner);
+
+            using(ParquetWriter writer = await ParquetWriter.CreateAsync(new ParquetSchema(id), counting)) {
+                using(ParquetRowGroupWriter rg = writer.CreateRowGroup()) {
+                    await rg.WriteColumnAsync(new DataColumn(id, new[] { 1, 2, 3, 4 }));
+                    Assert.Equal(0, counting.FlushCount);
+                }
+
+                Assert.Equal(0, counting.FlushCount);
+            }
+
+            Assert.Equal(1, counting.FlushCount);
+        }
+
+        [Fact]
         public async Task CustomMetadata_file_can_write_and_read() {
             var ms = new MemoryStream();
             var id = new DataField<int>("id");
@@ -364,7 +385,7 @@ namespace Parquet.Test {
                 ParquetRowGroupReader rgr = reader.OpenRowGroupReader(0);
                 Meta.ColumnChunk? cc = rgr.GetMetadata(id);
                 Assert.NotNull(cc);
-                Assert.Equal(Parquet.Meta.Encoding.DELTA_BINARY_PACKED, cc.MetaData!.Encodings[2]);
+                Assert.Contains(Parquet.Meta.Encoding.DELTA_BINARY_PACKED, cc.MetaData!.Encodings);
             }
         }
 
@@ -387,7 +408,7 @@ namespace Parquet.Test {
                 ParquetRowGroupReader rgr = reader.OpenRowGroupReader(0);
                 Meta.ColumnChunk? cc = rgr.GetMetadata(id);
                 Assert.NotNull(cc);
-                Assert.Equal(Parquet.Meta.Encoding.PLAIN, cc.MetaData!.Encodings[2]);
+                Assert.Contains(Parquet.Meta.Encoding.PLAIN, cc.MetaData!.Encodings);
             }
         }
 
@@ -459,6 +480,18 @@ namespace Parquet.Test {
                         await gw.WriteColumnAsync(new DataColumn((DataField)schema[1], new int[] { 100, 200 }));
                     }
                 });
+            }
+        }
+
+        class FlushCountingStream : DelegatedStream {
+            public int FlushCount { get; private set; }
+
+            public FlushCountingStream(Stream master) : base(master) {
+            }
+
+            public override void Flush() {
+                FlushCount++;
+                base.Flush();
             }
         }
     }

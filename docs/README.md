@@ -6,7 +6,7 @@
 ![GitHub forks](https://img.shields.io/github/forks/aloneguid/parquet-dotnet)
 ![Icon](https://github.com/aloneguid/parquet-dotnet/blob/master/docs/img/banner.png?raw=true)
 
-**Fully managed, safe, extremely fast** .NET library to 📖read and ✍️write [Apache Parquet](https://parquet.apache.org/) files designed for .NET world (not a wrapper). Targets `.NET 10`, `.NET 8`, `.NET 7`, `.NET 6.0`, `.NET Core 3.1`,  `.NET Standard 2.1` and `.NET Standard 2.0`.
+**Fully managed, safe, extremely fast** .NET library to 📖read and ✍️write [Apache Parquet](https://parquet.apache.org/) files designed for .NET world (not a wrapper). Targets modern .NET runtimes such as `.NET 10` and `.NET 8`.
 
 Whether you want to build apps for Linux, MacOS, Windows, iOS, Android, Tizen, Xbox, PS4, Raspberry Pi, Samsung TVs or much more, Parquet.Net has you covered.
 
@@ -19,7 +19,7 @@ Whether you want to build apps for Linux, MacOS, Windows, iOS, Android, Tizen, X
 - 🦄**Unique Features**:
   - The only library that supports dynamic schemas.
   - Supports all parquet types, encodings and compressions.
-  - Fully supports [C# class serialization](#serialization), for all simple and **complex** Parquet types.
+  - Fully supports [C# class serialization](#high-level-api), for all simple and **complex** Parquet types.
   - Provides **low-level**, high-level, and untyped API.
   - Access to file and column metadata
   - [Integration with DataFrames](#dataframe-support) (`Microsoft.Data.Analysis`).
@@ -176,15 +176,14 @@ IList<Event> data = await ParquetSerializer.DeserializeAsync<Event>("/mnt/storag
 Class serialization is really fast as it generates [compiled expression trees](https://learn.microsoft.com/en-US/dotnet/csharp/programming-guide/concepts/expression-trees/) on the fly. That means there is a small delay when serializing the first entity, which in most cases is negligible. Once the class is serialized at least once, further operations become much faster (around ~40x compared to reflection on large amounts of data (~5 million records)).
 
 > [!TIP]
- > Class serialization philosophy is based on the idea that we don't need to reinvent the wheel when it comes to converting objects to and from JSON. Instead of creating our own custom serializers and deserializers, we can leverage the existing JSON infrastructure that .NET provides. This way, we can save time and effort, and also make our code more consistent and compatible with other .NET applications that use JSON.
+> Class serialization philosophy is based on the idea that we don't need to reinvent the wheel when it comes to converting objects to and from JSON. Instead of creating our own custom serializers and deserializers, we can leverage the existing JSON infrastructure that .NET provides. This way, we can save time and effort, and also make our code more consistent and compatible with other .NET applications that use JSON.
 
 Note that classes (or structs) in general purpose programming languages represent rows, but parquet is columnar. Therefore, there are natural limitations to what data structures are supported in parquet serialization:
 
 - In order for the deserializer to work, classes need to have a parameterless constructor.
 - Both properties and fields are supported, and naturally when serializing those need to be readable, and when deserializing they need to be writeable. This might limit your use cases if you are trying to deserialize into immutable objects, and in this case you should probably keep DTOs specifically designed for parquet format, which is still easier than using low level API.
--- The deserializer does not "overwrite" class members; i.e. if you are deserializing into a list property and the default constructor already initializes the list with some values, the Parquet deserializer will append data to the list instead of overwriting it.
-- Both properties and fields are supported, and naturally when serializing those need to be readable, and when deserializing they need to be writable. This might limit your use cases if you are trying to deserialize into immutable objects; in this case you should probably keep DTOs specifically designed for Parquet format, which is still easier than using the low-level API.
 - The deserializer does not "overwrite" class members; i.e. if you are deserializing into a list property and the default constructor already initializes the list with some values, the Parquet deserializer will append data to the list instead of overwriting it.
+- While you can serialize `struct`, deserialization is only supported to `class` due to internal optimisation requirements.
 
 ## Customising serialization
 
@@ -421,6 +420,7 @@ IList<AfterRename> data3 = await ParquetSerializer.DeserializeAsync<AfterRename>
 - **Compression** can be selected after constructing `ParquetWriter`, where compression method `CompressionMethod` and/or compression level ([`CompressionLevel`](https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.compressionlevel?view=net-7.0)) can be set. They default to `Snappy`, which is very reasonable.
 - **Metadata** reading and writing is supported on both parquet reader and writer.
 - **Statistics** can be read on a particular row group at zero cost by calling to `GetStatistics(DataField field)`.
+- You can find other useful options in `ParquetOptions` class that can always be supplied to reader, writer, and serializer.
 
 ## Appending to files
 
@@ -539,6 +539,7 @@ classDiagram
     DataField <|-- DataField~T~
     DataField <|-- DateTimeDataField
     DataField <|-- DecimalDataField
+    DecimalDataField <|-- BigDecimalDataField
     DataField <|-- TimeSpanDataField
     
     Field <|-- ListField
@@ -577,6 +578,12 @@ classDiagram
     }
 
     class DecimalDataField {
+        +int Precision
+        +int Scale
+        +bool: ForceByteArrayEncoding
+    }
+    
+    class BigDecimalDataField {
         +int Precision
         +int Scale
         +bool: ForceByteArrayEncoding
@@ -996,16 +1003,14 @@ DataFrame dfr = await stream.ReadParquetAsDataFrameAsync();
 - [Kusto-loco - C# KQL query engine with flexible I/O layers and visualization](https://github.com/NeilMacMullen/kusto-loco).
 - [DeltaIO - Delta Lake implementation in pure .NET](https://github.com/aloneguid/delta).
 - [Personal Data Warehouse - Import(Excel/Parquet/SQL/Fabric)-Transform(C#/Python)-Report(SSRS)](https://github.com/BlazorData-Net/PersonalDataWarehouse).
-- [FastBCP - Export to parquet files in parallel from Oracle, SQL Server, MySQL, PostgreSQL, ODBC, Teradata, Netezza, SAP HANA, ClickHouse in one command line (Windows & Linux)](https://www.arpe.io/fastbcp/).
+- [FastBCP - Export to parquet files in parallel from Oracle, SQL Server, MySQL, PostgreSQL, ODBC, Teradata, Netezza, SAP HANA, ClickHouse in one command line (Windows & Linux)](https://fastbcp.arpe.io/).
 
 
 *...raise a PR to appear here...*
 
 ## Contributing
 
-Any contributions are welcome, in any form. Documentation, code, tests, or anything else.
-
-If you happen to get interested in parquet development, there are some [interesting links](parquet-getting-started.md). The first important thing you can do is simply star ⭐ this project.
+Any contributions are welcome, in any form. Documentation, code, tests, or anything else. The first important thing you can do is simply star ⭐ this project.
 
 ## Special thanks
 
@@ -1014,6 +1019,5 @@ Without these tools development would be really painful.
 - [Visual Studio Community](https://visualstudio.microsoft.com/vs/community/) - free IDE from Microsoft. The best in class C# and C++ development tool. It's worth using Windows just because Visual Studio exists there.
 - [JetBrains Rider](https://www.jetbrains.com/rider/) - for their cross-platform C# IDE, which has some great features.
 - [IntelliJ IDEA](https://www.jetbrains.com/idea/) - the best Python, Scala and Java IDE.
-- [LINQPad](https://www.linqpad.net/) - extremely powerful C# REPL with unique visualisation features, IL decompiler, expression tree visualiser, benchmarking, charting and so on. Again it's worth having Windows just for this tool. Please support the author and purchase it.
 - [Benchmarkdotnet](https://benchmarkdotnet.org/) - the best cross-platform tool that can microbenchmark C# code. This library is faster than native ones only thanks for this.
 - **You** starring ⭐ this project!
