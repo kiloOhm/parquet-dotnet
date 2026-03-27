@@ -1151,6 +1151,24 @@ public class ParquetSerializerTest : TestBase {
         Assert.True(data2.All(d => d.LowerCase == "on" || d.LowerCase == "off"));
     }
 
+    [Fact]
+    public async Task RenameProperty_CaseInsensitive_RowGroupDeserializeIntoExistingList() {
+        var data = Enumerable.Range(0, 1_000).Select(i => new BeforeRename {
+            lowerCase = i % 2 == 0 ? "on" : "off"
+        }).ToList();
+
+        using var ms = new MemoryStream();
+        await ParquetSerializer.SerializeAsync(data, ms);
+        ms.Position = 0;
+
+        var result = new List<AfterRename>();
+        await ParquetSerializer.DeserializeAsync(ms, 0, result,
+            new ParquetSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.Equal(data.Count, result.Count);
+        Assert.True(result.All(d => d.LowerCase == "on" || d.LowerCase == "off"));
+    }
+
 #if NET6_0_OR_GREATER
 
     record RecordContainingDateAndtimeOnly {

@@ -273,7 +273,7 @@ public static class ParquetSerializer {
         using ParquetReader reader =
             await ParquetReader.CreateAsync(source, options?.ParquetOptions, cancellationToken: cancellationToken);
 
-        await DeserializeAsync(reader, rowGroupIndex, result, cancellationToken, resultsAlreadyAllocated);
+        await DeserializeAsync(reader, rowGroupIndex, result, cancellationToken, resultsAlreadyAllocated, options);
     }
 
     /// <summary>
