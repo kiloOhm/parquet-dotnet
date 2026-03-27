@@ -84,6 +84,52 @@ namespace Parquet.Test.PageIndex {
         }
 
         [Fact]
+        public async Task Write_With_PageIndexes_Then_Read_Them_Back_After_Async_Dispose() {
+            var schema = new ParquetSchema(new DataField<int>("id"));
+            DataField field = schema.GetDataFields().Single();
+            var column = new DataColumn(field, new[] { 1, 2, 3, 4, 5, 6 });
+            var options = new ParquetOptions {
+                DataPageRowCountLimit = 2
+            };
+
+            using var ms = new MemoryStream();
+            await using(ParquetWriter writer = await ParquetWriter.CreateAsync(schema, ms, options)) {
+                using ParquetRowGroupWriter rowGroup = writer.CreateRowGroup();
+                await rowGroup.WriteColumnAsync(column);
+            }
+
+            ms.Position = 0;
+            using ParquetReader reader = await ParquetReader.CreateAsync(ms);
+            using ParquetRowGroupReader rowGroupReader = reader.OpenRowGroupReader(0);
+
+            DataField readField = reader.Schema.GetDataFields().Single();
+            OffsetIndex? offsetIndex = rowGroupReader.GetOffsetIndex(readField);
+            ColumnIndex? columnIndex = rowGroupReader.GetColumnIndex(readField);
+
+            Assert.NotNull(offsetIndex);
+            Assert.NotNull(columnIndex);
+            Assert.Equal(new long[] { 0, 2, 4 }, offsetIndex!.PageLocations.Select(pl => pl.FirstRowIndex).ToArray());
+            Assert.Equal(3, columnIndex!.NullPages.Count);
+        }
+
+        [Fact]
+        public async Task Write_With_Invalid_RowCountLimit_Throws() {
+            var schema = new ParquetSchema(new DataField<int>("id"));
+            DataField field = schema.GetDataFields().Single();
+            var options = new ParquetOptions {
+                DataPageRowCountLimit = 0
+            };
+
+            using var ms = new MemoryStream();
+            using ParquetWriter writer = await ParquetWriter.CreateAsync(schema, ms, options);
+            using ParquetRowGroupWriter rowGroup = writer.CreateRowGroup();
+
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => {
+                await rowGroup.WriteColumnAsync(new DataColumn(field, new[] { 1, 2, 3 }));
+            });
+        }
+
+        [Fact]
         public async Task Write_BoolColumn_Writes_OffsetIndex_But_Skips_ColumnIndex() {
             var schema = new ParquetSchema(new DataField<bool>("flag"));
             var field = (DataField)schema.Fields[0];
@@ -110,6 +156,45 @@ namespace Parquet.Test.PageIndex {
             Assert.NotNull(offsetIndex);
             Assert.True(chunk.OffsetIndexOffset >= offsetIndex!.PageLocations[0].Offset + offsetIndex.PageLocations[0].CompressedPageSize);
             Assert.Null(rowGroupReader.GetColumnIndex(readField));
+        }
+
+        [Fact]
+        public async Task Write_ColumnKeyEncryptedColumn_Writes_ColumnKeyEncrypted_PageIndexes() {
+            var schema = new ParquetSchema(new DataField<int>("secret"));
+            DataField field = schema.GetDataFields().Single();
+            var options = new ParquetOptions {
+                FooterEncryptionKey = "footerKey-16byte"
+            };
+            options.ColumnKeys["secret"] = new ParquetOptions.ColumnKeySpec("columnKey-16byte");
+
+            using var ms = new MemoryStream();
+            using(ParquetWriter writer = await ParquetWriter.CreateAsync(schema, ms, options)) {
+                using ParquetRowGroupWriter rowGroup = writer.CreateRowGroup();
+                await rowGroup.WriteColumnAsync(new DataColumn(field, new[] { 10, 20, 30, 40 }));
+            }
+
+            ms.Position = 0;
+            var readOptions = new ParquetOptions {
+                FooterEncryptionKey = options.FooterEncryptionKey,
+                ColumnKeyResolver = (path, _) => string.Join(".", path) == "secret" ? "columnKey-16byte" : null
+            };
+
+            using ParquetReader reader = await ParquetReader.CreateAsync(ms, readOptions);
+            using ParquetRowGroupReader rowGroupReader = reader.OpenRowGroupReader(0);
+
+            ColumnChunk chunk = reader.Metadata!.RowGroups[0].Columns[0];
+            Assert.NotNull(chunk.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY);
+
+            DataField readField = reader.Schema.GetDataFields().Single();
+            OffsetIndex? offsetIndex = rowGroupReader.GetOffsetIndex(readField);
+            ColumnIndex? columnIndex = rowGroupReader.GetColumnIndex(readField);
+            ParquetColumnPageReader pageReader = await rowGroupReader.OpenColumnPageReaderAsync(readField);
+            ParquetDataPage page = await pageReader.ReadPageAsync(0);
+
+            Assert.NotNull(offsetIndex);
+            Assert.NotNull(columnIndex);
+            Assert.Single(offsetIndex!.PageLocations);
+            Assert.Equal(new[] { 10, 20, 30, 40 }, (int[])page.Column.Data);
         }
 
         [Fact]

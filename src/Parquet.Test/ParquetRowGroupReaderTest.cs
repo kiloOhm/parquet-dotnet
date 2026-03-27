@@ -158,5 +158,34 @@ namespace Parquet.Test {
             Assert.Null(rowGroupReader.GetOffsetIndex(rowGroupField));
             Assert.Null(rowGroupReader.GetColumnIndex(rowGroupField));
         }
+
+        [Fact]
+        public async Task PageReader_Extensions_Work_For_Interface_Readers() {
+            var schema = new ParquetSchema(new DataField<int>("id"));
+            DataField field = schema.GetDataFields().Single();
+            var options = new ParquetOptions {
+                DataPageRowCountLimit = 2
+            };
+
+            using var ms = new MemoryStream();
+            await using(ParquetWriter writer = await ParquetWriter.CreateAsync(schema, ms, options)) {
+                using ParquetRowGroupWriter rowGroup = writer.CreateRowGroup();
+                await rowGroup.WriteColumnAsync(new DataColumn(field, new[] { 1, 2, 3, 4 }));
+            }
+
+            ms.Position = 0;
+            using ParquetReader reader = await ParquetReader.CreateAsync(ms);
+            IParquetRowGroupReader rowGroupReader = reader.RowGroups.Single();
+            DataField readField = reader.Schema.GetDataFields().Single();
+
+            ColumnIndex? columnIndex = await rowGroupReader.GetOrCreateColumnIndexAsync(readField);
+            ParquetColumnPageReader pageReader = await rowGroupReader.OpenColumnPageReaderAsync(readField);
+            ParquetDataPage page = await pageReader.ReadPageAsync(1);
+
+            Assert.NotNull(columnIndex);
+            Assert.Equal(2, pageReader.PageCount);
+            Assert.Equal(2, page.Location.FirstRowIndex);
+            Assert.Equal(new[] { 3, 4 }, (int[])page.Column.Data);
+        }
     }
 }

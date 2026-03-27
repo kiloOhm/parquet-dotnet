@@ -96,6 +96,59 @@ namespace Parquet.Test.PageIndex {
         }
 
         [Fact]
+        public void WriteOffsetIndex_Sets_Metadata_And_RoundTrips() {
+            OffsetIndex expected = MakeOffsetIndex();
+            ColumnChunk chunk = new ColumnChunk();
+
+            using var ms = new MemoryStream();
+            (long offset, int length) = PageIndexIO.WriteOffsetIndex(ms, expected, chunk, MakeWriter);
+            ms.Seek(0, SeekOrigin.Begin);
+
+            OffsetIndex actual = PageIndexIO.ReadOffsetIndex(ms, chunk, MakeReader);
+
+            Assert.Equal(0, offset);
+            Assert.Equal(length, chunk.OffsetIndexLength);
+            Assert.Equal(offset, chunk.OffsetIndexOffset);
+            Assert.Equal(new long[] { 5, 7 }, actual.UnencodedByteArrayDataBytes);
+            Assert.Equal(10, actual.PageLocations[1].FirstRowIndex);
+        }
+
+        [Fact]
+        public void WriteEncryptedColumnIndex_Sets_Metadata_And_RoundTrips() {
+            const short rowGroupOrdinal = 5;
+            const short columnOrdinal = 2;
+            ColumnIndex expected = MakeColumnIndex();
+            ColumnChunk chunk = new ColumnChunk();
+            AES_GCM_V1_Encryption enc = MakeGcm();
+            AES_GCM_V1_Encryption dec = MakeGcm();
+
+            using var ms = new MemoryStream();
+            (long offset, int length) = PageIndexIO.WriteColumnIndex(
+                ms,
+                expected,
+                chunk,
+                MakeWriter,
+                enc,
+                rowGroupOrdinal,
+                columnOrdinal);
+            ms.Seek(0, SeekOrigin.Begin);
+
+            ColumnIndex actual = PageIndexIO.ReadEncryptedColumnIndex(
+                ms,
+                chunk,
+                dec,
+                rowGroupOrdinal,
+                columnOrdinal,
+                MakeReader);
+
+            Assert.Equal(0, offset);
+            Assert.Equal(length, chunk.ColumnIndexLength);
+            Assert.Equal(offset, chunk.ColumnIndexOffset);
+            Assert.Equal(new bool[] { false, true }, actual.NullPages);
+            Assert.Equal(new long[] { 0, 10 }, actual.NullCounts);
+        }
+
+        [Fact]
         public void ReadOffsetIndex_RoundTrip_Works() {
             OffsetIndex expected = MakeOffsetIndex();
             ColumnChunk chunk = new ColumnChunk();
