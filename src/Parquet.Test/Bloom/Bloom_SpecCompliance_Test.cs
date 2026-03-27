@@ -102,6 +102,7 @@ namespace Parquet.Test.Bloom {
             using var ms = new MemoryStream();
             var writer = new DataColumnWriter(ms, footer, se,
                 CompressionMethod.None, options: new ParquetOptions {
+                    DataPageRowCountLimit = 3,
                     BloomFilterOptionsByColumn = new Dictionary<string, ParquetOptions.BloomFilterOptions>() {
                         { field.Name, new ParquetOptions.BloomFilterOptions { EnableBloomFilters = true } }
                     }

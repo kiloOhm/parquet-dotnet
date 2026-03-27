@@ -61,6 +61,12 @@ namespace Parquet {
         public bool UseDeltaBinaryPackedEncoding { get; set; } = true;
 
         /// <summary>
+        /// Maximum number of rows written to a single data page.
+        /// Pages are split on row boundaries so page indexes can expose valid <c>first_row_index</c> values.
+        /// </summary>
+        public int DataPageRowCountLimit { get; set; } = 20_000;
+
+        /// <summary>
         /// This option is passed to the <see cref="Microsoft.IO.RecyclableMemoryStreamManager"/> , 
         /// which keeps a pool of streams in memory for reuse. 
         /// By default when this option is unset, the RecyclableStreamManager 

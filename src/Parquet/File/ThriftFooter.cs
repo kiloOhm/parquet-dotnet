@@ -14,6 +14,8 @@ namespace Parquet.File {
     class ThriftFooter {
         private readonly FileMetaData _fileMeta;
         private readonly ThriftSchemaTree _tree;
+        private readonly Dictionary<ColumnChunk, PendingPageIndex> _pendingPageIndexes = new();
+        private bool _pageIndexesWritten;
 
         internal static ThriftFooter Empty => new();
 
@@ -215,6 +217,73 @@ namespace Parquet.File {
 
         public EncryptionBase? Encrypter { get; set; }
 
+        internal void RegisterPageIndex(
+            ColumnChunk columnChunk,
+            OffsetIndex offsetIndex,
+            ColumnIndex? columnIndex,
+            EncryptionBase? encrypter,
+            short rowGroupOrdinal,
+            short columnOrdinal) {
+            if(columnChunk == null)
+                throw new ArgumentNullException(nameof(columnChunk));
+            if(offsetIndex == null)
+                throw new ArgumentNullException(nameof(offsetIndex));
+
+            _pendingPageIndexes[columnChunk] = new PendingPageIndex {
+                RowGroupOrdinal = rowGroupOrdinal,
+                ColumnOrdinal = columnOrdinal,
+                OffsetIndexBytes = SerializeOffsetIndex(offsetIndex, encrypter, rowGroupOrdinal, columnOrdinal),
+                ColumnIndexBytes = columnIndex == null ? null : SerializeColumnIndex(columnIndex, encrypter, rowGroupOrdinal, columnOrdinal)
+            };
+            _pageIndexesWritten = false;
+        }
+
+        internal void WritePageIndexes(Stream output) {
+            if(output == null)
+                throw new ArgumentNullException(nameof(output));
+            if(_pageIndexesWritten || _pendingPageIndexes.Count == 0)
+                return;
+
+            foreach(RowGroup rowGroup in _fileMeta.RowGroups) {
+                foreach(ColumnChunk columnChunk in rowGroup.Columns) {
+                    if(_pendingPageIndexes.TryGetValue(columnChunk, out PendingPageIndex? pending) && pending.ColumnIndexBytes != null) {
+                        WriteModule(output, columnChunk, pending.ColumnIndexBytes, isOffsetIndex: false);
+                    }
+                }
+
+                foreach(ColumnChunk columnChunk in rowGroup.Columns) {
+                    if(_pendingPageIndexes.TryGetValue(columnChunk, out PendingPageIndex? pending)) {
+                        WriteModule(output, columnChunk, pending.OffsetIndexBytes, isOffsetIndex: true);
+                    }
+                }
+            }
+
+            _pageIndexesWritten = true;
+        }
+
+        internal async Task WritePageIndexesAsync(Stream output, CancellationToken cancellationToken = default) {
+            if(output == null)
+                throw new ArgumentNullException(nameof(output));
+            if(_pageIndexesWritten || _pendingPageIndexes.Count == 0)
+                return;
+
+            foreach(RowGroup rowGroup in _fileMeta.RowGroups) {
+                foreach(ColumnChunk columnChunk in rowGroup.Columns) {
+                    if(_pendingPageIndexes.TryGetValue(columnChunk, out PendingPageIndex? pending) && pending.ColumnIndexBytes != null) {
+                        await WriteModuleAsync(output, columnChunk, pending.ColumnIndexBytes, isOffsetIndex: false, cancellationToken);
+                    }
+                }
+
+                foreach(ColumnChunk columnChunk in rowGroup.Columns) {
+                    if(_pendingPageIndexes.TryGetValue(columnChunk, out PendingPageIndex? pending)) {
+                        await WriteModuleAsync(output, columnChunk, pending.OffsetIndexBytes, isOffsetIndex: true, cancellationToken);
+                    }
+                }
+            }
+
+            _pageIndexesWritten = true;
+        }
+
         #region [ Conversion to Model Schema ]
 
         public ParquetSchema CreateModelSchema(ParquetOptions formatOptions) {
@@ -267,6 +336,11 @@ namespace Parquet.File {
                 SchemaEncoder.Encode(se, root, meta.Schema, options);
             }
 
+            meta.ColumnOrders = meta.Schema
+                .Where(se => se.Type != null)
+                .Select(_ => new ColumnOrder { TYPEORDER = new TypeDefinedOrder() })
+                .ToList();
+
             return meta;
         }
 
@@ -280,6 +354,70 @@ namespace Parquet.File {
         #endregion
 
         #region [ Helpers ]
+
+        private static byte[] SerializeOffsetIndex(
+            OffsetIndex offsetIndex,
+            EncryptionBase? encrypter,
+            short rowGroupOrdinal,
+            short columnOrdinal) {
+            using var ms = new MemoryStream();
+            offsetIndex.Write(new ThriftCompactProtocolWriter(ms));
+            byte[] plain = ms.ToArray();
+            return encrypter == null
+                ? plain
+                : encrypter.EncryptOffsetIndex(plain, rowGroupOrdinal, columnOrdinal);
+        }
+
+        private static byte[] SerializeColumnIndex(
+            ColumnIndex columnIndex,
+            EncryptionBase? encrypter,
+            short rowGroupOrdinal,
+            short columnOrdinal) {
+            using var ms = new MemoryStream();
+            columnIndex.Write(new ThriftCompactProtocolWriter(ms));
+            byte[] plain = ms.ToArray();
+            return encrypter == null
+                ? plain
+                : encrypter.EncryptColumnIndex(plain, rowGroupOrdinal, columnOrdinal);
+        }
+
+        private static void WriteModule(Stream output, ColumnChunk columnChunk, byte[] bytes, bool isOffsetIndex) {
+            long offset = output.Position;
+            output.Write(bytes, 0, bytes.Length);
+
+            if(isOffsetIndex) {
+                columnChunk.OffsetIndexOffset = offset;
+                columnChunk.OffsetIndexLength = bytes.Length;
+            } else {
+                columnChunk.ColumnIndexOffset = offset;
+                columnChunk.ColumnIndexLength = bytes.Length;
+            }
+        }
+
+        private static async Task WriteModuleAsync(
+            Stream output,
+            ColumnChunk columnChunk,
+            byte[] bytes,
+            bool isOffsetIndex,
+            CancellationToken cancellationToken) {
+            long offset = output.Position;
+            await output.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
+
+            if(isOffsetIndex) {
+                columnChunk.OffsetIndexOffset = offset;
+                columnChunk.OffsetIndexLength = bytes.Length;
+            } else {
+                columnChunk.ColumnIndexOffset = offset;
+                columnChunk.ColumnIndexLength = bytes.Length;
+            }
+        }
+
+        class PendingPageIndex {
+            public short RowGroupOrdinal { get; set; }
+            public short ColumnOrdinal { get; set; }
+            public byte[] OffsetIndexBytes { get; set; } = Array.Empty<byte>();
+            public byte[]? ColumnIndexBytes { get; set; }
+        }
 
         class ThriftSchemaTree {
             readonly Dictionary<SchemaElement, Node?> _memoizedFindResults =

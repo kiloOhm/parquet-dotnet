@@ -175,6 +175,7 @@ class DataColumnWriter {
         public int CompressedSize;
         public int UncompressedSize;
         public readonly List<PageHeader> Pages = new();
+        public readonly List<PageIndexEntry> DataPages = new();
 
         public List<Encoding> GetUsedEncodings() {
             var r = new HashSet<Encoding>();
@@ -195,7 +196,27 @@ class DataColumnWriter {
         }
     }
 
-    private async Task CompressAndWriteAsync(
+    class PageIndexEntry {
+        public PageLocation Location { get; set; } = new PageLocation();
+        public Statistics? Statistics { get; set; }
+        public long? UnencodedByteArrayDataBytes { get; set; }
+        public int ValueCount { get; set; }
+    }
+
+    class PageWriteMetrics {
+        public long Offset { get; set; }
+        public int TotalSize { get; set; }
+    }
+
+    class PageSlice {
+        public int ValueOffset { get; set; }
+        public int ValueCount { get; set; }
+        public int DefinedValueOffset { get; set; }
+        public int DefinedValueCount { get; set; }
+        public long FirstRowIndex { get; set; }
+    }
+
+    private async Task<PageWriteMetrics> CompressAndWriteAsync(
         PageHeader ph, MemoryStream uncompressedData,
         ColumnMetrics cs,
         Encryption.EncryptionBase? encrForThisColumn,
@@ -205,6 +226,7 @@ class DataColumnWriter {
         using IMemoryOwner<byte> pageData = await Compressor.Instance.CompressAsync(
             _compressionMethod, _compressionLevel, uncompressedData);
         int compressedLength = pageData.Memory.Length;
+        long pageOffset = _stream.Position;
 
         // ---- PLAINTEXT path for this column ----
         if(encrForThisColumn is null) {
@@ -229,7 +251,10 @@ class DataColumnWriter {
 
             cs.CompressedSize += ph.CompressedPageSize;
             cs.UncompressedSize += ph.UncompressedPageSize;
-            return;
+            return new PageWriteMetrics {
+                Offset = pageOffset,
+                TotalSize = ph.CompressedPageSize + GetSerializedPageHeaderSize(ph)
+            };
         }
 
         // ---- ENCRYPTED path for this column ----
@@ -258,6 +283,10 @@ class DataColumnWriter {
 
         cs.CompressedSize += encHeader.Length + encBody.Length;
         cs.UncompressedSize += headerBytes.Length + ph.UncompressedPageSize;
+        return new PageWriteMetrics {
+            Offset = pageOffset,
+            TotalSize = encHeader.Length + encBody.Length
+        };
     }
 
     private async Task<ColumnMetrics> WriteColumnAsync(
@@ -272,6 +301,7 @@ class DataColumnWriter {
 
         using var pc = new PackedColumn(column);
         pc.Pack(_options.UseDictionaryEncoding, _options.DictionaryEncodingThreshold);
+        PopulateColumnStatistics(pc, column);
 
         // Bloom filter setup
         BloomCollector? bloom = null;
@@ -303,45 +333,69 @@ class DataColumnWriter {
             }
         }
 
-        // data page
-        using(MemoryStream ms = _rmsMgr.GetStream()) {
-            chunk.MetaData!.DataPageOffset = _stream.Position;
-            Array data = pc.GetPlainData(out int offset, out int count);
-            bool deltaEncode = column.IsDeltaEncodable && _options.UseDeltaBinaryPackedEncoding && DeltaBinaryPackedEncoder.CanEncode(data, offset, count);
+        Array data = pc.GetPlainData(out _, out int definedValueCount);
+        Array definedData = column.DefinedData;
+        if(bloom != null && !pc.HasDictionary) {
+            BloomAddValues(bloom, data, 0, definedValueCount, _schemaElement);
+        }
 
-            // data page Num_values also does include NULLs
-            PageHeader ph = _footer.CreateDataPage(column.NumValues, pc.HasDictionary, deltaEncode, out DataPageHeader dph);
+        int[]? dictionaryIndexes = pc.HasDictionary
+            ? pc.GetDictionaryIndexes(out _)
+            : null;
+
+        bool wroteDataPageOffset = false;
+        foreach(PageSlice slice in BuildPageSlices(column, pc)) {
+            using MemoryStream ms = _rmsMgr.GetStream();
+            if(!wroteDataPageOffset) {
+                chunk.MetaData!.DataPageOffset = _stream.Position;
+                wroteDataPageOffset = true;
+            }
+
+            bool deltaEncode = !pc.HasDictionary &&
+                column.IsDeltaEncodable &&
+                _options.UseDeltaBinaryPackedEncoding &&
+                DeltaBinaryPackedEncoder.CanEncode(data, slice.DefinedValueOffset, slice.DefinedValueCount);
+
+            PageHeader ph = _footer.CreateDataPage(slice.ValueCount, pc.HasDictionary, deltaEncode, out DataPageHeader dph);
             r.Pages.Add(ph);
+
             if(pc.HasRepetitionLevels) {
-                WriteLevels(ms, pc.RepetitionLevels!, pc.RepetitionLevels!.Length, column.Field.MaxRepetitionLevel);
+                WriteLevels(ms, pc.RepetitionLevels!, slice.ValueOffset, slice.ValueCount, column.Field.MaxRepetitionLevel);
             }
             if(pc.HasDefinitionLevels) {
-                WriteLevels(ms, pc.DefinitionLevels!, column.DefinitionLevels!.Length, column.Field.MaxDefinitionLevel);
+                WriteLevels(ms, pc.DefinitionLevels!, slice.ValueOffset, slice.ValueCount, column.Field.MaxDefinitionLevel);
             }
+
+            var pageStats = new DataColumnStatistics {
+                NullCount = slice.ValueCount - slice.DefinedValueCount
+            };
 
             if(pc.HasDictionary) {
-                // dictionary indexes are always encoded with RLE
-                int[] indexes = pc.GetDictionaryIndexes(out int indexesLength)!;
                 int bitWidth = pc.Dictionary!.Length.GetBitWidth();
                 ms.WriteByte((byte)bitWidth);   // bit width is stored as 1 byte before encoded data
-                RleBitpackedHybridEncoder.Encode(ms, indexes.AsSpan(0, indexesLength), bitWidth);
+                RleBitpackedHybridEncoder.Encode(ms, dictionaryIndexes!.AsSpan(slice.DefinedValueOffset, slice.DefinedValueCount), bitWidth);
+                TryFillStats(definedData, slice.DefinedValueOffset, slice.DefinedValueCount, pageStats);
+            } else if(deltaEncode) {
+                DeltaBinaryPackedEncoder.Encode(data, slice.DefinedValueOffset, slice.DefinedValueCount, ms, pageStats);
             } else {
-                // Feed non-dictionary data values into bloom
-                if(bloom != null) {
-                    BloomAddValues(bloom, data, offset, count, _schemaElement);
-                }
-
-                if(deltaEncode) {
-                    DeltaBinaryPackedEncoder.Encode(data, offset, count, ms, column.Statistics);
-                } else {
-                    ParquetPlainEncoder.Encode(data, offset, count, tse, ms, pc.HasDictionary ? null : column.Statistics);
-                }
+                ParquetPlainEncoder.Encode(data, slice.DefinedValueOffset, slice.DefinedValueCount, tse, ms, pageStats);
             }
 
-            dph.Statistics = column.Statistics!.ToThriftStatistics(tse);
-            await CompressAndWriteAsync(ph, ms, r, encrForThisColumn, cancellationToken);
+            dph.Statistics = pageStats.ToThriftStatistics(tse);
+            PageWriteMetrics pageMetrics = await CompressAndWriteAsync(ph, ms, r, encrForThisColumn, cancellationToken);
+            r.DataPages.Add(new PageIndexEntry {
+                Location = new PageLocation {
+                    Offset = pageMetrics.Offset,
+                    CompressedPageSize = pageMetrics.TotalSize,
+                    FirstRowIndex = slice.FirstRowIndex
+                },
+                Statistics = dph.Statistics,
+                ValueCount = slice.ValueCount
+            });
             _pageOrdinal++;
         }
+
+        RegisterPageIndexes(chunk, r, encrForThisColumn);
 
         // Write bloom filter after all pages
         if(bloom != null && chunk?.MetaData != null) {
@@ -358,9 +412,223 @@ class DataColumnWriter {
         return r;
     }
 
-    private static void WriteLevels(Stream s, Span<int> levels, int count, int maxValue) {
+    private IReadOnlyList<PageSlice> BuildPageSlices(DataColumn column, PackedColumn packedColumn) {
+        int pageRowCountLimit = _options.DataPageRowCountLimit;
+        if(pageRowCountLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(_options.DataPageRowCountLimit), pageRowCountLimit,
+                "DataPageRowCountLimit must be greater than zero.");
+
+        int totalValueCount = column.NumValues;
+        int[]? definitionLevels = packedColumn.DefinitionLevels;
+        int[] definedValueOffsets = BuildDefinedValueOffsets(definitionLevels, column.Field.MaxDefinitionLevel, totalValueCount);
+        var slices = new List<PageSlice>();
+
+        void AddSlice(int valueOffset, int valueCount, long firstRowIndex, int rowCount) {
+            int definedValueOffset = definedValueOffsets[valueOffset];
+            int definedValueCount = definedValueOffsets[valueOffset + valueCount] - definedValueOffset;
+            slices.Add(new PageSlice {
+                ValueOffset = valueOffset,
+                ValueCount = valueCount,
+                DefinedValueOffset = definedValueOffset,
+                DefinedValueCount = definedValueCount,
+                FirstRowIndex = firstRowIndex
+            });
+        }
+
+        if(totalValueCount == 0) {
+            AddSlice(0, 0, 0, 0);
+            return slices;
+        }
+
+        if(!packedColumn.HasRepetitionLevels) {
+            long firstRowIndex = 0;
+            for(int valueOffset = 0; valueOffset < totalValueCount;) {
+                int rowCount = Math.Min(pageRowCountLimit, totalValueCount - valueOffset);
+                AddSlice(valueOffset, rowCount, firstRowIndex, rowCount);
+                valueOffset += rowCount;
+                firstRowIndex += rowCount;
+            }
+            return slices;
+        }
+
+        int[] repetitionLevels = packedColumn.RepetitionLevels!;
+        int pageStart = 0;
+        long currentFirstRowIndex = 0;
+
+        while(pageStart < totalValueCount) {
+            int pageEnd = pageStart;
+            int rowCount = 0;
+
+            while(pageEnd < totalValueCount) {
+                if(repetitionLevels[pageEnd] == 0) {
+                    if(rowCount == pageRowCountLimit && pageEnd > pageStart)
+                        break;
+                    rowCount++;
+                }
+                pageEnd++;
+            }
+
+            AddSlice(pageStart, pageEnd - pageStart, currentFirstRowIndex, rowCount);
+            pageStart = pageEnd;
+            currentFirstRowIndex += rowCount;
+        }
+
+        return slices;
+    }
+
+    private static int[] BuildDefinedValueOffsets(int[]? definitionLevels, int maxDefinitionLevel, int totalValueCount) {
+        var offsets = new int[totalValueCount + 1];
+        if(definitionLevels == null) {
+            for(int i = 0; i <= totalValueCount; i++) {
+                offsets[i] = i;
+            }
+            return offsets;
+        }
+
+        for(int i = 0; i < totalValueCount; i++) {
+            offsets[i + 1] = offsets[i] + (definitionLevels[i] == maxDefinitionLevel ? 1 : 0);
+        }
+
+        return offsets;
+    }
+
+    private static void PopulateColumnStatistics(PackedColumn packedColumn, DataColumn column) {
+        Array statsSource = packedColumn.HasDictionary
+            ? packedColumn.Dictionary!
+            : packedColumn.GetPlainData(out _, out _);
+
+        int statsCount = packedColumn.HasDictionary
+            ? packedColumn.Dictionary!.Length
+            : column.DefinedData.Length;
+
+        column.Statistics.MinValue = null;
+        column.Statistics.MaxValue = null;
+        TryFillStats(statsSource, 0, statsCount, column.Statistics);
+    }
+
+    private static void TryFillStats(Array data, int offset, int count, DataColumnStatistics stats) {
+        if(count <= 0)
+            return;
+        if(offset < 0 || offset > data.Length || count > data.Length - offset) {
+            throw new ArgumentOutOfRangeException(nameof(count),
+                $"Invalid stats slice: offset={offset}, count={count}, length={data.Length}, type={data.GetType().FullName}");
+        }
+
+        System.Type dataType = data.GetType();
+        if(dataType == typeof(byte[])) {
+            ParquetPlainEncoder.FillStats(((byte[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(sbyte[])) {
+            ParquetPlainEncoder.FillStats(((sbyte[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(short[])) {
+            ParquetPlainEncoder.FillStats(((short[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(ushort[])) {
+            ParquetPlainEncoder.FillStats(((ushort[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(int[])) {
+            ParquetPlainEncoder.FillStats(((int[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(uint[])) {
+            ParquetPlainEncoder.FillStats(((uint[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(long[])) {
+            ParquetPlainEncoder.FillStats(((long[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(ulong[])) {
+            ParquetPlainEncoder.FillStats(((ulong[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(System.Numerics.BigInteger[])) {
+            ParquetPlainEncoder.FillStats(((System.Numerics.BigInteger[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(decimal[])) {
+            ParquetPlainEncoder.FillStats(((decimal[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(BigDecimal[])) {
+            ParquetPlainEncoder.FillStats(((BigDecimal[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(double[])) {
+            ParquetPlainEncoder.FillStats(((double[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(float[])) {
+            ParquetPlainEncoder.FillStats(((float[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(DateTime[])) {
+            ParquetPlainEncoder.FillStats(((DateTime[])data).AsSpan(offset, count), stats);
+#if NET6_0_OR_GREATER
+        } else if(dataType == typeof(DateOnly[])) {
+            ParquetPlainEncoder.FillStats(((DateOnly[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(TimeOnly[])) {
+            ParquetPlainEncoder.FillStats(((TimeOnly[])data).AsSpan(offset, count), stats);
+#endif
+        } else if(dataType == typeof(TimeSpan[])) {
+            ParquetPlainEncoder.FillStats(((TimeSpan[])data).AsSpan(offset, count), stats);
+        } else if(dataType == typeof(string[])) {
+            ParquetPlainEncoder.FillStats(((string[])data).AsSpan(offset, count), stats);
+        }
+    }
+
+    private void RegisterPageIndexes(
+        ColumnChunk chunk,
+        ColumnMetrics metrics,
+        Encryption.EncryptionBase? encrForThisColumn) {
+        if(metrics.DataPages.Count == 0)
+            return;
+
+        var offsetIndex = new OffsetIndex {
+            PageLocations = metrics.DataPages.Select(dp => dp.Location).ToList()
+        };
+
+        if(metrics.DataPages.Any(dp => dp.UnencodedByteArrayDataBytes.HasValue)) {
+            offsetIndex.UnencodedByteArrayDataBytes = metrics.DataPages
+                .Select(dp => dp.UnencodedByteArrayDataBytes ?? 0L)
+                .ToList();
+        }
+
+        ColumnIndex? columnIndex = TryBuildColumnIndex(metrics);
+        _footer.RegisterPageIndex(
+            chunk,
+            offsetIndex,
+            columnIndex,
+            encrForThisColumn,
+            _rowGroupOrdinal,
+            _columnOrdinal);
+    }
+
+    private static ColumnIndex? TryBuildColumnIndex(ColumnMetrics metrics) {
+        if(metrics.DataPages.Count == 0)
+            return null;
+
+        var nullPages = new List<bool>(metrics.DataPages.Count);
+        var minValues = new List<byte[]>(metrics.DataPages.Count);
+        var maxValues = new List<byte[]>(metrics.DataPages.Count);
+        var nullCounts = new List<long>(metrics.DataPages.Count);
+
+        foreach(PageIndexEntry page in metrics.DataPages) {
+            Statistics? stats = page.Statistics;
+            if(stats == null)
+                return null;
+
+            bool isNullPage = stats.NullCount.HasValue
+                && stats.NullCount.Value == page.ValueCount
+                && stats.MinValue == null
+                && stats.MaxValue == null;
+
+            if(!isNullPage && (stats.MinValue == null || stats.MaxValue == null))
+                return null;
+
+            nullPages.Add(isNullPage);
+            minValues.Add(isNullPage ? Array.Empty<byte>() : stats.MinValue!);
+            maxValues.Add(isNullPage ? Array.Empty<byte>() : stats.MaxValue!);
+            nullCounts.Add(stats.NullCount ?? 0);
+        }
+
+        return new ColumnIndex {
+            NullPages = nullPages,
+            MinValues = minValues,
+            MaxValues = maxValues,
+            BoundaryOrder = BoundaryOrder.UNORDERED,
+            NullCounts = nullCounts
+        };
+    }
+
+    private static int GetSerializedPageHeaderSize(PageHeader ph) {
+        using var ms = new MemoryStream();
+        ph.Write(new Meta.Proto.ThriftCompactProtocolWriter(ms));
+        return checked((int)ms.Length);
+    }
+
+    private static void WriteLevels(Stream s, int[] levels, int offset, int count, int maxValue) {
         int bitWidth = maxValue.GetBitWidth();
-        RleBitpackedHybridEncoder.EncodeWithLength(s, bitWidth, levels.Slice(0, count));
+        RleBitpackedHybridEncoder.EncodeWithLength(s, bitWidth, levels.AsSpan(offset, count));
     }
 
     private static void BloomAddValues(BloomCollector bloom, Array values, int offset, int count, SchemaElement tse) {

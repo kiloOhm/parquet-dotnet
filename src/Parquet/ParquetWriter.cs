@@ -237,6 +237,8 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
             return;
         }
 
+        _footer.WritePageIndexes(Stream);
+
         using var ms = new MemoryStream();
 
         // --- Plaintext footer mode (always ends with PAR1) ---
@@ -309,6 +311,8 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
         if(_footer == null) {
             return;
         }
+
+        await _footer.WritePageIndexesAsync(Stream).ConfigureAwait(false);
 
         using var ms = new MemoryStream();
 
