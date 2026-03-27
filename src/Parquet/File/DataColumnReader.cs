@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -269,6 +270,113 @@ namespace Parquet.File {
             return column;
         }
 
+        public async Task<DataColumn> ReadPagesAsync(
+            IReadOnlyCollection<int> pageOrdinals,
+            OffsetIndex offsetIndex,
+            CancellationToken cancellationToken = default) {
+            if(pageOrdinals == null)
+                throw new ArgumentNullException(nameof(pageOrdinals));
+            if(offsetIndex == null)
+                throw new ArgumentNullException(nameof(offsetIndex));
+
+            int[] selectedPages = pageOrdinals
+                .Distinct()
+                .OrderBy(i => i)
+                .ToArray();
+
+            if(selectedPages.Length == 0) {
+                using var emptyPackedColumn = new PackedColumn(_dataField, 0, 0);
+                return emptyPackedColumn.Unpack();
+            }
+
+            for(int i = 0; i < selectedPages.Length; i++) {
+                int pageOrdinal = selectedPages[i];
+                if(pageOrdinal < 0 || pageOrdinal >= offsetIndex.PageLocations.Count) {
+                    throw new ArgumentOutOfRangeException(nameof(pageOrdinals), pageOrdinal,
+                        $"Page ordinal {pageOrdinal} is outside the available page range 0..{offsetIndex.PageLocations.Count - 1}.");
+                }
+            }
+
+            int totalValuesInChunk = (int)_thriftColumnChunk.MetaData!.NumValues;
+            int definedValuesCount = totalValuesInChunk;
+            if(_stats?.NullCount != null)
+                definedValuesCount -= (int)_stats.NullCount.Value;
+
+            using var pc = new PackedColumn(_dataField, totalValuesInChunk, definedValuesCount);
+            bool useEncryption = _thriftColumnChunk.CryptoMetadata is not null;
+            short columnOrdinal = (short)_rowGroup.Columns.IndexOf(_thriftColumnChunk);
+            if(columnOrdinal < 0)
+                throw new InvalidDataException("Could not determine column ordinal");
+
+            await ReadDictionaryPageIfPresentAsync(useEncryption, columnOrdinal, pc);
+
+            foreach(int pageOrdinal in selectedPages) {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                PageLocation pageLocation = offsetIndex.PageLocations[pageOrdinal];
+                _inputStream.Seek(pageLocation.Offset, SeekOrigin.Begin);
+                await ReadSelectedDataPageAsync(useEncryption, columnOrdinal, (short)pageOrdinal, pc, totalValuesInChunk);
+            }
+
+            return pc.Unpack();
+        }
+
+        public async Task<OffsetIndex> ScanOffsetIndexAsync(CancellationToken cancellationToken = default) {
+            long originalPosition = _inputStream.CanSeek ? _inputStream.Position : 0;
+            try {
+                int totalValuesInChunk = (int)_thriftColumnChunk.MetaData!.NumValues;
+                int valuesRead = 0;
+                long firstRowIndex = 0;
+
+                long fileOffset = GetFileOffset(out bool isDictionaryPageOffset);
+                _inputStream.Seek(fileOffset, SeekOrigin.Begin);
+
+                bool useEncryption = _thriftColumnChunk.CryptoMetadata is not null;
+                short columnOrdinal = (short)_rowGroup.Columns.IndexOf(_thriftColumnChunk);
+                if(columnOrdinal < 0)
+                    throw new InvalidDataException("Could not determine column ordinal");
+
+                if(isDictionaryPageOffset) {
+                    await SkipDictionaryPageAsync(useEncryption, columnOrdinal, cancellationToken);
+                }
+
+                var locations = new List<PageLocation>();
+                short pageOrdinal = 0;
+
+                while(valuesRead < totalValuesInChunk) {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    long pageStart = _inputStream.Position;
+                    int pageValueCount;
+                    int rowCount;
+
+                    if(useEncryption) {
+                        (pageValueCount, rowCount) = await ScanEncryptedDataPageAsync(columnOrdinal, pageOrdinal);
+                    } else {
+                        (pageValueCount, rowCount) = await ScanPlainDataPageAsync(totalValuesInChunk);
+                    }
+
+                    long pageEnd = _inputStream.Position;
+                    locations.Add(new PageLocation {
+                        Offset = pageStart,
+                        CompressedPageSize = checked((int)(pageEnd - pageStart)),
+                        FirstRowIndex = firstRowIndex
+                    });
+
+                    valuesRead += pageValueCount;
+                    firstRowIndex += rowCount;
+                    pageOrdinal++;
+                }
+
+                return new OffsetIndex {
+                    PageLocations = locations
+                };
+            } finally {
+                if(_inputStream.CanSeek)
+                    _inputStream.Seek(originalPosition, SeekOrigin.Begin);
+            }
+        }
+
         private async ValueTask<IMemoryOwner<byte>> ReadPageDataAsync(PageHeader ph) {
             Stream src = _inputStream.Sub(_inputStream.Position, ph.CompressedPageSize);
             return await Compressor.Instance.Decompress(_compressionMethod, src, ph.UncompressedPageSize);
@@ -295,6 +403,218 @@ namespace Parquet.File {
                    _schemaElement!, bytes.Memory.Span, out int dictionaryOffset);
 
             pc.AssignDictionary(dictionary);
+        }
+
+        private async Task ReadDictionaryPageIfPresentAsync(
+            bool useEncryption,
+            short columnOrdinal,
+            PackedColumn pc) {
+            long? dictionaryPageOffset = _thriftColumnChunk.MetaData?.DictionaryPageOffset;
+            if(!dictionaryPageOffset.HasValue)
+                return;
+
+            _inputStream.Seek(dictionaryPageOffset.Value, SeekOrigin.Begin);
+
+            if(useEncryption) {
+                using(ColumnKeySelection.PushKeyFor(_thriftColumnChunk, _options, _footer.Decrypter)) {
+                    byte[] dictHdr = _footer.Decrypter!.DecryptDictionaryPageHeader(
+                        new ThriftCompactProtocolReader(_inputStream),
+                        _rowGroup.Ordinal!.Value,
+                        columnOrdinal);
+
+                    using var ms = new MemoryStream(dictHdr);
+                    var hdrReader = new ThriftCompactProtocolReader(ms);
+                    var ph = PageHeader.Read(hdrReader);
+
+                    byte[] dictBody = _footer.Decrypter.DecryptDictionaryPage(
+                        new ThriftCompactProtocolReader(_inputStream),
+                        _rowGroup.Ordinal!.Value,
+                        columnOrdinal);
+
+                    await ReadDictionaryPageFromBuffer(ph, dictBody, pc);
+                }
+            } else {
+                var reader = new ThriftCompactProtocolReader(_inputStream);
+                PageHeader ph = PageHeader.Read(reader);
+                await ReadDictionaryPage(ph, pc);
+            }
+        }
+
+        private async Task ReadSelectedDataPageAsync(
+            bool useEncryption,
+            short columnOrdinal,
+            short pageOrdinal,
+            PackedColumn pc,
+            int totalValuesInChunk) {
+            if(useEncryption) {
+                using(ColumnKeySelection.PushKeyFor(_thriftColumnChunk, _options, _footer.Decrypter)) {
+                    byte[] hdr = _footer.Decrypter!.DecryptDataPageHeader(
+                        new ThriftCompactProtocolReader(_inputStream),
+                        _rowGroup.Ordinal!.Value,
+                        columnOrdinal,
+                        pageOrdinal);
+
+                    using var ms = new MemoryStream(hdr);
+                    var hdrReader = new ThriftCompactProtocolReader(ms);
+                    var ph = PageHeader.Read(hdrReader);
+
+                    byte[] body = _footer.Decrypter.DecryptDataPage(
+                        new ThriftCompactProtocolReader(_inputStream),
+                        _rowGroup.Ordinal!.Value,
+                        columnOrdinal,
+                        pageOrdinal);
+
+                    if(ph.Type == PageType.DATA_PAGE) {
+                        await ReadDataPageV1FromBuffer(ph, body, pc);
+                    } else if(ph.Type == PageType.DATA_PAGE_V2) {
+                        await ReadDataPageV2FromBuffer(ph, body, pc, totalValuesInChunk);
+                    } else {
+                        throw new InvalidDataException($"Selected page ordinal {pageOrdinal} did not point to a data page.");
+                    }
+                }
+            } else {
+                var reader = new ThriftCompactProtocolReader(_inputStream);
+                PageHeader ph = PageHeader.Read(reader);
+
+                if(ph.Type == PageType.DATA_PAGE) {
+                    await ReadDataPageV1Async(ph, pc);
+                } else if(ph.Type == PageType.DATA_PAGE_V2) {
+                    await ReadDataPageV2Async(ph, pc, totalValuesInChunk);
+                } else {
+                    throw new InvalidDataException($"Selected page ordinal {pageOrdinal} did not point to a data page.");
+                }
+            }
+        }
+
+        private async Task SkipDictionaryPageAsync(
+            bool useEncryption,
+            short columnOrdinal,
+            CancellationToken cancellationToken) {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if(useEncryption) {
+                using(ColumnKeySelection.PushKeyFor(_thriftColumnChunk, _options, _footer.Decrypter)) {
+                    _ = _footer.Decrypter!.DecryptDictionaryPageHeader(
+                        new ThriftCompactProtocolReader(_inputStream),
+                        _rowGroup.Ordinal!.Value,
+                        columnOrdinal);
+                    _ = _footer.Decrypter.DecryptDictionaryPage(
+                        new ThriftCompactProtocolReader(_inputStream),
+                        _rowGroup.Ordinal!.Value,
+                        columnOrdinal);
+                }
+                return;
+            }
+
+            var reader = new ThriftCompactProtocolReader(_inputStream);
+            PageHeader ph = PageHeader.Read(reader);
+            if(ph.Type != PageType.DICTIONARY_PAGE)
+                throw new InvalidDataException("Expected a dictionary page at DictionaryPageOffset.");
+            _inputStream.Seek(ph.CompressedPageSize, SeekOrigin.Current);
+        }
+
+        private async Task<(int ValueCount, int RowCount)> ScanPlainDataPageAsync(int totalValuesInChunk) {
+            var reader = new ThriftCompactProtocolReader(_inputStream);
+            PageHeader ph = PageHeader.Read(reader);
+
+            return ph.Type switch {
+                PageType.DATA_PAGE => await ScanPlainDataPageV1Async(ph),
+                PageType.DATA_PAGE_V2 => await ScanPlainDataPageV2Async(ph),
+                _ => throw new InvalidDataException($"Expected a data page, found '{ph.Type}'.")
+            };
+        }
+
+        private async Task<(int ValueCount, int RowCount)> ScanEncryptedDataPageAsync(
+            short columnOrdinal,
+            short pageOrdinal) {
+            using(ColumnKeySelection.PushKeyFor(_thriftColumnChunk, _options, _footer.Decrypter)) {
+                byte[] hdr = _footer.Decrypter!.DecryptDataPageHeader(
+                    new ThriftCompactProtocolReader(_inputStream),
+                    _rowGroup.Ordinal!.Value,
+                    columnOrdinal,
+                    pageOrdinal);
+
+                using var ms = new MemoryStream(hdr);
+                var hdrReader = new ThriftCompactProtocolReader(ms);
+                PageHeader ph = PageHeader.Read(hdrReader);
+
+                byte[] body = _footer.Decrypter.DecryptDataPage(
+                    new ThriftCompactProtocolReader(_inputStream),
+                    _rowGroup.Ordinal!.Value,
+                    columnOrdinal,
+                    pageOrdinal);
+
+                return ph.Type switch {
+                    PageType.DATA_PAGE => await ScanEncryptedDataPageV1Async(ph, body),
+                    PageType.DATA_PAGE_V2 => ScanDataPageV2(ph),
+                    _ => throw new InvalidDataException($"Expected a data page, found '{ph.Type}'.")
+                };
+            }
+        }
+
+        private async Task<(int ValueCount, int RowCount)> ScanPlainDataPageV1Async(PageHeader ph) {
+            if(ph.DataPageHeader == null)
+                throw new ParquetException($"column '{_dataField.Path}' is missing data page header, file is corrupt");
+
+            int valueCount = ph.DataPageHeader.NumValues;
+            if(_dataField.MaxRepetitionLevel == 0) {
+                _inputStream.Seek(ph.CompressedPageSize, SeekOrigin.Current);
+                return (valueCount, valueCount);
+            }
+
+            using IMemoryOwner<byte> bytes = await ReadPageDataAsync(ph);
+            return (valueCount, CountRowsFromDataPageV1(bytes.Memory.Span, valueCount));
+        }
+
+        private async Task<(int ValueCount, int RowCount)> ScanEncryptedDataPageV1Async(PageHeader ph, byte[] body) {
+            if(ph.DataPageHeader == null)
+                throw new ParquetException($"column '{_dataField.Path}' is missing data page header, file is corrupt");
+
+            int valueCount = ph.DataPageHeader.NumValues;
+            if(_dataField.MaxRepetitionLevel == 0)
+                return (valueCount, valueCount);
+
+            using IMemoryOwner<byte> bytes =
+                await DecompressWholePageFromBufferAsync(body, 0, body.Length, ph.UncompressedPageSize, _thriftColumnChunk.MetaData!.Codec);
+            return (valueCount, CountRowsFromDataPageV1(bytes.Memory.Span, valueCount));
+        }
+
+        private async Task<(int ValueCount, int RowCount)> ScanPlainDataPageV2Async(PageHeader ph) {
+            (int valueCount, int rowCount) = ScanDataPageV2(ph);
+            _inputStream.Seek(ph.CompressedPageSize, SeekOrigin.Current);
+            return (valueCount, rowCount);
+        }
+
+        private static (int ValueCount, int RowCount) ScanDataPageV2(PageHeader ph) {
+            if(ph.DataPageHeaderV2 == null)
+                throw new ParquetException("data page V2 header is missing");
+            return (ph.DataPageHeaderV2.NumValues, ph.DataPageHeaderV2.NumRows);
+        }
+
+        private int CountRowsFromDataPageV1(ReadOnlySpan<byte> pageBytes, int pageValueCount) {
+            if(_dataField.MaxRepetitionLevel == 0)
+                return pageValueCount;
+
+            var repetitionLevels = new int[pageValueCount];
+            Span<byte> mutable = AsMutableSpan(pageBytes, out byte[] rented);
+            try {
+                int levelsRead = ReadLevels(
+                    mutable,
+                    _dataField.MaxRepetitionLevel,
+                    repetitionLevels,
+                    pageValueCount,
+                    null,
+                    out _);
+
+                int rowCount = 0;
+                for(int i = 0; i < levelsRead; i++) {
+                    if(repetitionLevels[i] == 0)
+                        rowCount++;
+                }
+                return rowCount;
+            } finally {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
         }
 
         private long GetFileOffset(out bool isDictionaryPageOffset) {

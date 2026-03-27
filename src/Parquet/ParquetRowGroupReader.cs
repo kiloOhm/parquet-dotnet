@@ -80,6 +80,10 @@ namespace Parquet {
         private readonly ParquetOptions? _options;
         private readonly Dictionary<FieldPath, ColumnChunk> _pathToChunk = new();
         private readonly List<(short colOrd, ColumnChunk cc)> _encryptedColumnChunks = new();
+        private readonly Dictionary<FieldPath, OffsetIndex?> _offsetIndexes = new();
+        private readonly Dictionary<FieldPath, ColumnIndex?> _columnIndexes = new();
+        private readonly Dictionary<FieldPath, OffsetIndex> _scannedOffsetIndexes = new();
+        private readonly Dictionary<FieldPath, ColumnIndex?> _computedColumnIndexes = new();
 
         internal ParquetRowGroupReader(
            RowGroup rowGroup,
@@ -145,6 +149,136 @@ namespace Parquet {
         }
 
         /// <summary>
+        /// Reads only the specified data pages from a column chunk.
+        /// Use with <see cref="GetOffsetIndex(DataField)"/> and, optionally,
+        /// <see cref="GetColumnIndex(DataField)"/> to implement page-level pruning.
+        /// </summary>
+        /// <param name="field">Field to read.</param>
+        /// <param name="pageOrdinals">Zero-based data-page ordinals to include.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>A column containing only the selected pages, in page order.</returns>
+        public async Task<DataColumn> ReadColumnPagesAsync(
+            DataField field,
+            IReadOnlyCollection<int> pageOrdinals,
+            CancellationToken cancellationToken = default) {
+            if(field == null)
+                throw new ArgumentNullException(nameof(field));
+            if(pageOrdinals == null)
+                throw new ArgumentNullException(nameof(pageOrdinals));
+
+            ColumnChunk columnChunk = GetMetadata(field)
+                ?? throw new ParquetException($"'{field.Path}' does not exist in this file");
+            OffsetIndex offsetIndex = await GetOrCreateOffsetIndexForPageReadsAsync(field, cancellationToken);
+
+            var columnReader = new DataColumnReader(field, _stream,
+                columnChunk, ReadColumnStatistics(columnChunk), _footer, _options, _rowGroup);
+            return await columnReader.ReadPagesAsync(pageOrdinals, offsetIndex, cancellationToken);
+        }
+
+        /// <summary>
+        /// Opens a public page reader for the specified field.
+        /// </summary>
+        /// <param name="field">Field to open a page reader for.</param>
+        /// <returns>A page reader bound to the field's column chunk.</returns>
+        public ParquetColumnPageReader OpenColumnPageReader(DataField field) {
+            return OpenColumnPageReaderAsync(field).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// Opens a public page reader for the specified field.
+        /// </summary>
+        /// <param name="field">Field to open a page reader for.</param>
+        /// <param name="cancellationToken">Cancellation token used when scanning page locations.</param>
+        /// <returns>A page reader bound to the field's column chunk.</returns>
+        public async Task<ParquetColumnPageReader> OpenColumnPageReaderAsync(DataField field, CancellationToken cancellationToken = default) {
+            if(field == null)
+                throw new ArgumentNullException(nameof(field));
+
+            ColumnChunk columnChunk = GetMetadata(field)
+                ?? throw new ParquetException($"'{field.Path}' does not exist in this file");
+            OffsetIndex offsetIndex = await GetOrCreateOffsetIndexForPageReadsAsync(field, cancellationToken);
+            ColumnIndex? columnIndex = GetColumnIndex(field);
+
+            return new ParquetColumnPageReader(this, field, columnChunk, offsetIndex, columnIndex);
+        }
+
+        /// <summary>
+        /// Returns the on-disk column index when present, or computes one page-by-page when it is absent.
+        /// </summary>
+        public async Task<ColumnIndex?> GetOrCreateColumnIndexAsync(
+            DataField field,
+            CancellationToken cancellationToken = default) {
+            ColumnIndex? actualColumnIndex = GetColumnIndex(field);
+            if(actualColumnIndex != null)
+                return actualColumnIndex;
+
+            FieldPath path = field.Path;
+            if(_computedColumnIndexes.TryGetValue(path, out ColumnIndex? cachedColumnIndex))
+                return cachedColumnIndex;
+
+            ColumnChunk columnChunk = GetMetadata(field)
+                ?? throw new ParquetException($"'{field.Path}' does not exist in this file");
+            SchemaElement schemaElement = _footer.GetSchemaElement(columnChunk)
+                ?? throw new ParquetException($"cannot find schema element for '{field.Path}'");
+            OffsetIndex offsetIndex = await GetOrCreateOffsetIndexForPageReadsAsync(field, cancellationToken);
+
+            var nullPages = new List<bool>(offsetIndex.PageLocations.Count);
+            var minValues = new List<byte[]>(offsetIndex.PageLocations.Count);
+            var maxValues = new List<byte[]>(offsetIndex.PageLocations.Count);
+            var nullCounts = new List<long>(offsetIndex.PageLocations.Count);
+
+            for(int pageOrdinal = 0; pageOrdinal < offsetIndex.PageLocations.Count; pageOrdinal++) {
+                DataColumn page = await ReadColumnPagesAsync(field, new[] { pageOrdinal }, cancellationToken);
+                var pageStats = new DataColumnStatistics {
+                    NullCount = page.NumValues - page.DefinedData.Length
+                };
+
+                bool isNullPage = pageStats.NullCount == page.NumValues;
+                if(!isNullPage && !TryFillStats(page.DefinedData, 0, page.DefinedData.Length, pageStats)) {
+                    _computedColumnIndexes[path] = null;
+                    return null;
+                }
+
+                Statistics thriftStats = pageStats.ToThriftStatistics(schemaElement);
+                nullPages.Add(isNullPage);
+                minValues.Add(isNullPage ? Array.Empty<byte>() : thriftStats.MinValue!);
+                maxValues.Add(isNullPage ? Array.Empty<byte>() : thriftStats.MaxValue!);
+                nullCounts.Add(pageStats.NullCount ?? 0);
+            }
+
+            var computedColumnIndex = new ColumnIndex {
+                NullPages = nullPages,
+                MinValues = minValues,
+                MaxValues = maxValues,
+                BoundaryOrder = BoundaryOrder.UNORDERED,
+                NullCounts = nullCounts
+            };
+
+            _computedColumnIndexes[path] = computedColumnIndex;
+            return computedColumnIndex;
+        }
+
+        private async Task<OffsetIndex> GetOrCreateOffsetIndexForPageReadsAsync(
+            DataField field,
+            CancellationToken cancellationToken = default) {
+            OffsetIndex? actualOffsetIndex = GetOffsetIndex(field);
+            if(actualOffsetIndex != null)
+                return actualOffsetIndex;
+
+            FieldPath path = field.Path;
+            if(_scannedOffsetIndexes.TryGetValue(path, out OffsetIndex? cachedOffsetIndex))
+                return cachedOffsetIndex;
+
+            ColumnChunk columnChunk = GetMetadata(field)
+                ?? throw new ParquetException($"'{field.Path}' does not exist in this file");
+            var columnReader = new DataColumnReader(field, _stream,
+                columnChunk, ReadColumnStatistics(columnChunk), _footer, _options, _rowGroup);
+            OffsetIndex scannedOffsetIndex = await columnReader.ScanOffsetIndexAsync(cancellationToken);
+            _scannedOffsetIndexes[path] = scannedOffsetIndex;
+            return scannedOffsetIndex;
+        }
+
+        /// <summary>
         /// Gets raw column chunk metadata for this field
         /// </summary>
         public ColumnChunk? GetMetadata(DataField field) {
@@ -207,6 +341,98 @@ namespace Parquet {
             return ReadColumnStatistics(cc);
         }
 
+        /// <summary>
+        /// Gets the row group's offset index for a data field when present.
+        /// </summary>
+        /// <param name="field">Field to get the offset index for.</param>
+        /// <returns>The offset index, or <see langword="null"/> when the column chunk does not contain one.</returns>
+        /// <remarks>
+        /// This does not read data pages. Stream position is preserved.
+        /// </remarks>
+        public OffsetIndex? GetOffsetIndex(DataField field) {
+            return ReadPageIndex(
+                field,
+                _offsetIndexes,
+                chunk => chunk.OffsetIndexOffset,
+                (stream, chunk) => PageIndexIO.ReadOffsetIndex(stream, chunk, s => new ThriftCompactProtocolReader(s)),
+                (stream, chunk, decrypter, rowGroupOrdinal, columnOrdinal) => PageIndexIO.ReadEncryptedOffsetIndex(
+                    stream,
+                    chunk,
+                    decrypter,
+                    rowGroupOrdinal,
+                    columnOrdinal,
+                    bytes => new ThriftCompactProtocolReader(new MemoryStream(bytes))),
+                "offset index");
+        }
+
+        /// <summary>
+        /// Gets the row group's column index for a data field when present.
+        /// </summary>
+        /// <param name="field">Field to get the column index for.</param>
+        /// <returns>The column index, or <see langword="null"/> when the column chunk does not contain one.</returns>
+        /// <remarks>
+        /// This does not read data pages. Stream position is preserved.
+        /// </remarks>
+        public ColumnIndex? GetColumnIndex(DataField field) {
+            return ReadPageIndex(
+                field,
+                _columnIndexes,
+                chunk => chunk.ColumnIndexOffset,
+                (stream, chunk) => PageIndexIO.ReadColumnIndex(stream, chunk, s => new ThriftCompactProtocolReader(s)),
+                (stream, chunk, decrypter, rowGroupOrdinal, columnOrdinal) => PageIndexIO.ReadEncryptedColumnIndex(
+                    stream,
+                    chunk,
+                    decrypter,
+                    rowGroupOrdinal,
+                    columnOrdinal,
+                    bytes => new ThriftCompactProtocolReader(new MemoryStream(bytes))),
+                "column index");
+        }
+
+        private TIndex? ReadPageIndex<TIndex>(
+            DataField field,
+            Dictionary<FieldPath, TIndex?> cache,
+            Func<ColumnChunk, long?> getOffset,
+            Func<Stream, ColumnChunk, TIndex> readPlain,
+            Func<Stream, ColumnChunk, EncryptionBase, short, short, TIndex> readEncrypted,
+            string indexName)
+            where TIndex : class {
+            if(field == null)
+                throw new ArgumentNullException(nameof(field));
+
+            FieldPath path = field.Path;
+            if(cache.TryGetValue(path, out TIndex? cachedIndex))
+                return cachedIndex;
+
+            ColumnChunk cc = GetMetadata(field) ?? throw new ParquetException($"'{field.Path}' does not exist in this file");
+            if(!getOffset(cc).HasValue) {
+                cache[path] = null;
+                return null;
+            }
+
+            long originalPosition = _stream.CanSeek ? _stream.Position : 0;
+            try {
+                TIndex index;
+                if(cc.CryptoMetadata == null) {
+                    index = readPlain(_stream, cc);
+                } else {
+                    short columnOrdinal = (short)_rowGroup.Columns.IndexOf(cc);
+                    if(columnOrdinal < 0)
+                        throw new InvalidDataException("Could not determine column ordinal.");
+
+                    EncryptionBase decrypter = CreateColumnModuleDecrypter(cc, path, indexName);
+                    short rowGroupOrdinal = _footer.GetRowGroupOrdinal(_rowGroup);
+                    index = readEncrypted(_stream, cc, decrypter, rowGroupOrdinal, columnOrdinal);
+                }
+
+                cache[path] = index;
+                return index;
+            } finally {
+                if(_stream.CanSeek)
+                    _stream.Seek(originalPosition, SeekOrigin.Begin);
+            }
+        }
+
         private ColumnChunk? ResolveChunkFor(FieldPath path) {
             if(_pathToChunk.TryGetValue(path, out ColumnChunk? ccPlain))
                 return ccPlain;
@@ -226,31 +452,7 @@ namespace Parquet {
         }
 
         private void DecryptColumnMetaFor(ColumnChunk encCc, FieldPath path, short colOrd) {
-            // Column-key info is required on encrypted column meta
-            EncryptionWithColumnKey ck = encCc.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY
-                     ?? throw new NotSupportedException(
-                         $"Column '{path}' has encrypted metadata but lacks column-key crypto metadata.");
-
-            string? keyString = _options?.ColumnKeyResolver?.Invoke(ck.PathInSchema, ck.KeyMetadata);
-            if(string.IsNullOrWhiteSpace(keyString))
-                throw new NotSupportedException(
-                    $"Column '{path}' uses column-key encryption. Provide a ColumnKeyResolver in ParquetOptions to supply the key.");
-
-            byte[] columnKey = EncryptionBase.ParseKeyString(keyString!);
-
-            // We need AAD context (prefix + fileUnique) from the file
-            EncryptionBase? ctx = _footer.Decrypter ?? _footer.Encrypter;
-            if(ctx == null)
-                throw new NotSupportedException($"Column '{path}' metadata is encrypted and AAD context is unavailable.");
-
-            // Create a fresh decrypter with the same algorithm, copy AAD, set the column key
-            EncryptionBase dec = ctx is AES_GCM_CTR_V1_Encryption
-                ? new AES_GCM_CTR_V1_Encryption()
-                : new AES_GCM_V1_Encryption();
-
-            dec.AadPrefix = ctx.AadPrefix;
-            dec.AadFileUnique = ctx.AadFileUnique;
-            dec.FooterEncryptionKey = columnKey;
+            EncryptionBase dec = CreateColumnKeyDecrypter(encCc, path, "metadata");
 
             // Decrypt ColumnMetaData (needs row-group & column ordinals)
             using var msEnc = new MemoryStream(encCc.EncryptedColumnMetadata!);
@@ -265,6 +467,100 @@ namespace Parquet {
 
             encCc.MetaData = realMeta;            // cache the real meta
             _pathToChunk[path] = encCc;         // make lookups fast next time
+        }
+
+        private EncryptionBase CreateColumnModuleDecrypter(ColumnChunk cc, FieldPath path, string moduleName) {
+            if(cc.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY != null)
+                return CreateColumnKeyDecrypter(cc, path, moduleName);
+
+            if(cc.CryptoMetadata?.ENCRYPTIONWITHFOOTERKEY != null) {
+                if(_footer.Decrypter?.FooterEncryptionKey == null) {
+                    throw new InvalidDataException(
+                        $"Column '{path}' has an encrypted {moduleName}, but no footer key/decrypter is available. " +
+                        "Provide ParquetOptions.FooterEncryptionKey (and AAD prefix if required).");
+                }
+
+                return _footer.Decrypter;
+            }
+
+            throw new InvalidOperationException($"Column '{path}' does not have encryption metadata for its {moduleName}.");
+        }
+
+        private EncryptionBase CreateColumnKeyDecrypter(ColumnChunk cc, FieldPath path, string moduleName) {
+            EncryptionWithColumnKey ck = cc.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY
+                ?? throw new NotSupportedException(
+                    $"Column '{path}' has encrypted {moduleName} but lacks column-key crypto metadata.");
+
+            string? keyString = _options?.ColumnKeyResolver?.Invoke(ck.PathInSchema, ck.KeyMetadata);
+            if(string.IsNullOrWhiteSpace(keyString)) {
+                throw new NotSupportedException(
+                    $"Column '{path}' uses column-key encryption for its {moduleName}. " +
+                    "Provide a ColumnKeyResolver in ParquetOptions to supply the key.");
+            }
+
+            byte[] columnKey = EncryptionBase.ParseKeyString(keyString);
+            EncryptionBase? ctx = _footer.Decrypter ?? _footer.Encrypter;
+            if(ctx == null)
+                throw new NotSupportedException($"Column '{path}' {moduleName} is encrypted and AAD context is unavailable.");
+
+            EncryptionBase dec = ctx is AES_GCM_CTR_V1_Encryption
+                ? new AES_GCM_CTR_V1_Encryption()
+                : new AES_GCM_V1_Encryption();
+
+            dec.AadPrefix = ctx.AadPrefix;
+            dec.AadFileUnique = ctx.AadFileUnique;
+            dec.FooterEncryptionKey = columnKey;
+            return dec;
+        }
+
+        private static bool TryFillStats(Array data, int offset, int count, DataColumnStatistics stats) {
+            if(count <= 0)
+                return true;
+
+            System.Type dataType = data.GetType();
+            if(dataType == typeof(byte[])) {
+                ParquetPlainEncoder.FillStats(((byte[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(sbyte[])) {
+                ParquetPlainEncoder.FillStats(((sbyte[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(short[])) {
+                ParquetPlainEncoder.FillStats(((short[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(ushort[])) {
+                ParquetPlainEncoder.FillStats(((ushort[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(int[])) {
+                ParquetPlainEncoder.FillStats(((int[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(uint[])) {
+                ParquetPlainEncoder.FillStats(((uint[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(long[])) {
+                ParquetPlainEncoder.FillStats(((long[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(ulong[])) {
+                ParquetPlainEncoder.FillStats(((ulong[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(System.Numerics.BigInteger[])) {
+                ParquetPlainEncoder.FillStats(((System.Numerics.BigInteger[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(decimal[])) {
+                ParquetPlainEncoder.FillStats(((decimal[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(BigDecimal[])) {
+                ParquetPlainEncoder.FillStats(((BigDecimal[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(double[])) {
+                ParquetPlainEncoder.FillStats(((double[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(float[])) {
+                ParquetPlainEncoder.FillStats(((float[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(DateTime[])) {
+                ParquetPlainEncoder.FillStats(((DateTime[])data).AsSpan(offset, count), stats);
+#if NET6_0_OR_GREATER
+            } else if(dataType == typeof(DateOnly[])) {
+                ParquetPlainEncoder.FillStats(((DateOnly[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(TimeOnly[])) {
+                ParquetPlainEncoder.FillStats(((TimeOnly[])data).AsSpan(offset, count), stats);
+#endif
+            } else if(dataType == typeof(TimeSpan[])) {
+                ParquetPlainEncoder.FillStats(((TimeSpan[])data).AsSpan(offset, count), stats);
+            } else if(dataType == typeof(string[])) {
+                ParquetPlainEncoder.FillStats(((string[])data).AsSpan(offset, count), stats);
+            } else {
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
