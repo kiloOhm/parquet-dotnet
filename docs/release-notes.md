@@ -1,3 +1,9 @@
+# 5.6.0-pre.3--kiloOhm.3
+
+## Fork changes
+
+- chore: updated repo and package info to not create confusion
+
 # 5.6.0-pre.3--kiloOhm.2
 
 Fork release based on upstream changes merged after `5.6.0-pre.3--kiloOhm.1`.
