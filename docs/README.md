@@ -1,4 +1,4 @@
-# This is a Fork of [aloneguid/parquet-dotnet](https://github.com/aloneguid/parquet-dotnet) with implementations for bloom filters and modular encryption
+This is a Fork of [aloneguid/parquet-dotnet](https://github.com/aloneguid/parquet-dotnet) with implementations for bloom filters and modular encryption
 
 # Apache Parquet for .NET 
 [![NuGet](https://img.shields.io/nuget/v/Parquet.Net.svg)](https://www.nuget.org/packages/Parquet.Net)
