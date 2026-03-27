@@ -1,3 +1,12 @@
+# 5.6.0-pre.3--kiloOhm.4
+
+## Fork changes
+
+- feat: added spec-aligned page index writing, including `column_orders`, footer-adjacent index modules, encrypted page indexes, and row-boundary-aware multi-page column chunks.
+- feat: added public row-group and page-level reader APIs for `OffsetIndex`, `ColumnIndex`, and selective page reads.
+- feat: added fallback scanning for files without persisted page indexes, including computed in-memory `ColumnIndex` support for query planning on supported types.
+- test: added focused coverage for page index IO, multi-page writing, selective page reads, encrypted indexes, and old-file fallback behaviour.
+
 # 5.6.0-pre.3--kiloOhm.3
 
 ## Fork changes
