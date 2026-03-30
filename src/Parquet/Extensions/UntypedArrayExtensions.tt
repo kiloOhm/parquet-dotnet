@@ -1,4 +1,4 @@
-﻿// This file is generated with T4
+// This file is generated with T4
 // https://learn.microsoft.com/en-us/visualstudio/modeling/text-template-control-blocks?view=vs-2022
 // Because of this, performance is truly great!
 // Hint: prefer Rider to edit .tt as it support syntax highlighting
@@ -39,7 +39,7 @@ namespace Parquet.Extensions {
 <#       }        
     }
     CallCalculateNullCount(types); #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <#  CallCalculateNullCount(net6_types); #>
 #endif            
             throw new NotSupportedException($"cannot count nulls in type {t}");
@@ -66,7 +66,7 @@ namespace Parquet.Extensions {
 
     EmitCalculateNullCount(types);
 #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# EmitCalculateNullCount(net6_types);  #>
 #endif
     #endregion
@@ -107,7 +107,7 @@ namespace Parquet.Extensions {
    }
    EmitCallPackNullsTypeFast(types);
 #> 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# EmitCallPackNullsTypeFast(net6_types); #>
 #endif
             throw new NotSupportedException($"cannot pack type {t}");
@@ -141,7 +141,7 @@ namespace Parquet.Extensions {
    }
 
    PackNullsTypeFast(types);  #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# PackNullsTypeFast(net6_types);#>
 #endif
     #endregion
@@ -174,7 +174,7 @@ namespace Parquet.Extensions {
    }
    EmitCallUnpackNullsTypeFast(types);
 #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# EmitCallUnpackNullsTypeFast(net6_types); #>
 #endif            
         throw new NotSupportedException($"cannot pack type {t}");
@@ -207,7 +207,7 @@ namespace Parquet.Extensions {
 
    UnpackNullsTypeFast(types);
 #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# UnpackNullsTypeFast(net6_types); #>
 #endif
     #endregion
@@ -237,7 +237,7 @@ namespace Parquet.Extensions {
    }
    EmitCallExplodeTypeFast(types);
 #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# EmitCallExplodeTypeFast(net6_types); #>
 #endif            
         throw new NotSupportedException($"cannot pack type {t}");
@@ -268,7 +268,7 @@ namespace Parquet.Extensions {
    }
    EmitExplodeTypeFast(types);
 #>
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 <# EmitExplodeTypeFast(net6_types);#>
 #endif
     #endregion

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -141,7 +141,7 @@ namespace Parquet.Schema {
 
         private Type BaseClrType {
             get {
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
                 if(ClrType == typeof(DateOnly))
                     return typeof(DateTime);
 

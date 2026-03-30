@@ -75,7 +75,7 @@ namespace Parquet.Utils {
 #if NETSTANDARD2_0
             await src.CopyToAsync(destination);
 #else
-            await src.CopyToAsync(destination, cancellationToken);
+            await src.CopyToAsync(destination, 81920, cancellationToken);
 #endif
 
             // get the schema from the first file, it will be used to validate the rest of the files

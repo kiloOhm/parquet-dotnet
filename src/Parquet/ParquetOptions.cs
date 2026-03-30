@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using Parquet.Data;
@@ -19,7 +19,7 @@ namespace Parquet {
         /// </summary>
         public bool TreatBigIntegersAsDates { get; set; } = true;
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         /// <summary>
         /// When set to true, parquet dates will be deserialized as <see cref="DateOnly"/>, otherwise
         /// as <see cref="DateTime"/> with missing time part.

@@ -1,6 +1,6 @@
-﻿using System;
+using System;
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
 namespace Parquet.Schema {
     /// <summary>
     /// Schema element for <see cref="TimeOnly"/> which allows to specify precision

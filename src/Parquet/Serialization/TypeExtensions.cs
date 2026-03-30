@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -164,7 +164,7 @@ namespace Parquet.Serialization {
                     t == typeof(TimeSpan?), null, propertyName) {
                     IsAdjustedToUTC = tsa == null ? true : tsa.IsAdjustedToUTC
                 };
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
             } else if(t == typeof(TimeOnly) || t == typeof(TimeOnly?)) {
                 r = new TimeOnlyDataField(name,
                     member?.MicroSecondsTimeAttribute == null
@@ -320,7 +320,7 @@ namespace Parquet.Serialization {
             switch(resolution) {
                 case ParquetTimestampResolution.Milliseconds:
                     return DateTimeTimeUnit.Millis;
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER || NET48
                 case ParquetTimestampResolution.Microseconds:
                     return DateTimeTimeUnit.Micros;
 #endif

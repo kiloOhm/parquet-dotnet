@@ -1,3 +1,12 @@
+# 5.6.0-pre.3--kiloOhm.5
+
+## Fork changes
+
+- feat: add a `net48` target to the forked `kiloOhm.Parquet.Net` package while keeping the existing `net8.0` and `net10.0` targets.
+- feat: add framework compatibility shims for async disposal, missing LINQ helpers, `DateOnly`/`TimeOnly`, and legacy compiler support needed to build on .NET Framework 4.8.
+- fix: add .NET Framework-safe fallbacks for Brotli compression, stream/span helpers, crypto operations, serializer helpers, and footer/page processing paths used by the query-layer integration.
+- fix: scope the fork-only `EnumerableCompatibility.Chunk(...)` helper to `net48` so it no longer collides with the built-in LINQ `Chunk(...)` API on modern targets.
+
 # 5.6.0-pre.3--kiloOhm.4
 
 ## Fork changes

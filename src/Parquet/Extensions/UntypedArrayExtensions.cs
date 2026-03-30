@@ -1,4 +1,4 @@
-﻿// This file is generated with T4
+// This file is generated with T4
 // https://learn.microsoft.com/en-us/visualstudio/modeling/text-template-control-blocks?view=vs-2022
 // Because of this, performance is truly great!
 // Hint: prefer Rider to edit .tt as it support syntax highlighting
@@ -77,7 +77,7 @@ namespace Parquet.Extensions {
             if(t == typeof(Guid?)) {
                 return CalculateNullCount((Guid?[])array, offset, count);
             }
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
             if(t == typeof(DateOnly?)) {
                 return CalculateNullCount((DateOnly?[])array, offset, count);
             }
@@ -268,7 +268,7 @@ namespace Parquet.Extensions {
             }
             return r;
         }
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         private static int CalculateNullCount(DateOnly?[] array, int offset, int count) {
             int r = 0;
             for(int i = offset; i < count; i++) {
@@ -449,7 +449,7 @@ namespace Parquet.Extensions {
                 return;
             }
  
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
             if(t == typeof(DateOnly?)) {
                 PackNullsTypeFast((DateOnly?[])array,
                     offset, count,
@@ -848,7 +848,7 @@ namespace Parquet.Extensions {
             }
         }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         private static void PackNullsTypeFast(DateOnly?[] array,
             int offset, int count,
             DateOnly[] packedArray,
@@ -1021,7 +1021,7 @@ namespace Parquet.Extensions {
                 (Guid?[])result);
             return;
         }
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         if(t == typeof(DateOnly)) {
             UnpackNullsTypeFast((DateOnly[])array,
                 flags, fillFlag,
@@ -1319,7 +1319,7 @@ namespace Parquet.Extensions {
         }
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     private static void UnpackNullsTypeFast(DateOnly[] array,
         Span<int> flags, int fillFlag,
         DateOnly?[] result) {
@@ -1460,7 +1460,7 @@ namespace Parquet.Extensions {
                 indexes, (Guid[])result, resultOffset, resultCount);
             return;
         }
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         if(t == typeof(DateOnly)) {
             ExplodeTypeFast((DateOnly[])dictionary,
                 indexes, (DateOnly[])result, resultOffset, resultCount);
@@ -1755,7 +1755,7 @@ namespace Parquet.Extensions {
         }
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     private static void ExplodeTypeFast(DateOnly[] dictionary,
         Span<int> indexes,
         DateOnly[] result, int resultOffset, int resultCount) {

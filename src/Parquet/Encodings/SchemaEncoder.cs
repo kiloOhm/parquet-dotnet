@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -26,8 +26,10 @@ static class SchemaEncoder {
         typeof(BigDecimal),
         typeof(BigInteger),
         typeof(DateTime),
+#if NET6_0_OR_GREATER || NET48
         typeof(DateOnly),
         typeof(TimeOnly),
+#endif
         typeof(TimeSpan),
         typeof(Interval),
         typeof(byte[]),
@@ -259,7 +261,11 @@ static class SchemaEncoder {
         // --- float16
 
         if(se.LogicalType?.FLOAT16 != null) {
+#if NET48
+            return null;
+#else
             return typeof(System.Half);
+#endif
         }
 
         // --- temporal types
@@ -584,7 +590,7 @@ static class SchemaEncoder {
             } else {
                 tse.Type = Type.INT96;
             }
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         } else if(st == typeof(DateOnly)) {
             // DateOnly
             tse.Type = Type.INT32;

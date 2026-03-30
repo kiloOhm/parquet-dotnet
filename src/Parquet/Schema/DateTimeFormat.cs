@@ -1,4 +1,4 @@
-﻿namespace Parquet.Schema {
+namespace Parquet.Schema {
     /// <summary>
     /// Choice of representing dates
     /// </summary>
@@ -15,7 +15,7 @@
         /// </summary>
         DateAndTime,
 
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER || NET48
         /// <summary>
         /// Stores date and time up to microsecond precision as INT64.
         /// </summary>

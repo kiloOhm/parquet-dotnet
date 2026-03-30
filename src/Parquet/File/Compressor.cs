@@ -1,8 +1,11 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.IO;
 using System.IO.Compression;
 using System.Threading.Tasks;
+#if NET48
+using BrotliStream = BrotliSharpLib.BrotliStream;
+#endif
 using CommunityToolkit.HighPerformance.Buffers;
 using K4os.Compression.LZ4;
 using Parquet.Extensions;
@@ -107,13 +110,24 @@ class DefaultCompressor : ICompressor {
 
     // "Brotli" compression
 
-#if !NETSTANDARD2_0
     private async ValueTask<IMemoryOwner<byte>> BrotliCompress(MemoryStream source, CompressionLevel level) {
         using var ms = new MemoryStream();
         source.Position = 0;
+#if NET48
+        using (var brotli = new BrotliStream(ms, CompressionMode.Compress, leaveOpen: true)) {
+            brotli.SetQuality(level switch {
+                CompressionLevel.Optimal => 5,
+                CompressionLevel.Fastest => 1,
+                CompressionLevel.NoCompression => 0,
+                _ => 5
+            });
+            await source.CopyToAsync(brotli);
+        }
+#else
         using (BrotliStream? brotli = new BrotliStream(ms, level, leaveOpen: true)) {
             await source.CopyToAsync(brotli);
         }
+#endif
         int len = (int)ms.Length;
         var owner = MemoryOwner<byte>.Allocate(len);
         byte[] buf = ms.GetBuffer();
@@ -142,7 +156,6 @@ class DefaultCompressor : ICompressor {
 
         return owner;
     }
-#endif
 
     // "Zstd" compression. Requires ZstdSharp NuGet package, but should come in .NET 11: https://github.com/dotnet/runtime/issues/59591
 
@@ -218,10 +231,8 @@ class DefaultCompressor : ICompressor {
                 return await GzipCompress(source, level);
 			case CompressionMethod.Lzo:
 				return await LzoCompress(source, level);
-#if !NETSTANDARD2_0
-			case CompressionMethod.Brotli:
+            case CompressionMethod.Brotli:
                 return await BrotliCompress(source, level);
-#endif
             case CompressionMethod.LZ4:
                 return await Lz4Compress(source, level);
 			case CompressionMethod.Zstd:
@@ -244,10 +255,8 @@ class DefaultCompressor : ICompressor {
                 return await GzipDecompress(source, destinationLength);
 			case CompressionMethod.Lzo:
 				return await LzoDecompress(source, destinationLength);
-#if !NETSTANDARD2_0
-			case CompressionMethod.Brotli:
+            case CompressionMethod.Brotli:
                 return await BrotliDecompress(source, destinationLength);
-#endif
             case CompressionMethod.LZ4:
                 return await Lz4Decompress(source, destinationLength);
 			case CompressionMethod.Zstd:

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -498,7 +498,7 @@ namespace Parquet {
                     "Provide a ColumnKeyResolver in ParquetOptions to supply the key.");
             }
 
-            byte[] columnKey = EncryptionBase.ParseKeyString(keyString);
+            byte[] columnKey = EncryptionBase.ParseKeyString(keyString!);
             EncryptionBase? ctx = _footer.Decrypter ?? _footer.Encrypter;
             if(ctx == null)
                 throw new NotSupportedException($"Column '{path}' {moduleName} is encrypted and AAD context is unavailable.");
@@ -546,7 +546,7 @@ namespace Parquet {
                 ParquetPlainEncoder.FillStats(((float[])data).AsSpan(offset, count), stats);
             } else if(dataType == typeof(DateTime[])) {
                 ParquetPlainEncoder.FillStats(((DateTime[])data).AsSpan(offset, count), stats);
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
             } else if(dataType == typeof(DateOnly[])) {
                 ParquetPlainEncoder.FillStats(((DateOnly[])data).AsSpan(offset, count), stats);
             } else if(dataType == typeof(TimeOnly[])) {

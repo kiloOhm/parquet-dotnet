@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -9,9 +9,11 @@ namespace Parquet {
         private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         private const long UnixEpochMilliseconds = 62_135_596_800_000L;
         private const long UnixEpochMicroseconds = 62_135_596_800_000_000L;
+        private const long TicksPerMicrosecond = 10L;
+        private const long NanosecondsPerTick = 100L;
         
-#if NET7_0_OR_GREATER
-        private static readonly long UnixEpochNanoseconds = UnixEpoch.Ticks * TimeSpan.NanosecondsPerTick;
+#if NET7_0_OR_GREATER || NET48
+        private static readonly long UnixEpochNanoseconds = UnixEpoch.Ticks * NanosecondsPerTick;
 #endif
 
         public static DateTimeOffset FromUnixMilliseconds(this long unixMilliseconds) {
@@ -27,14 +29,14 @@ namespace Parquet {
             return milliseconds - UnixEpochMilliseconds;
         }
 
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER || NET48
         public static long ToUnixMicroseconds(this DateTime dto) {
-            long microseconds = dto.Ticks / TimeSpan.TicksPerMicrosecond;
+            long microseconds = dto.Ticks / TicksPerMicrosecond;
             return microseconds - UnixEpochMicroseconds;
         }
         
         public static long ToUnixNanoseconds(this DateTime dto) {
-            long nanoseconds = dto.Ticks * TimeSpan.NanosecondsPerTick;
+            long nanoseconds = dto.Ticks * NanosecondsPerTick;
             return nanoseconds - UnixEpochNanoseconds;
         }
 #endif
@@ -48,7 +50,7 @@ namespace Parquet {
             return (int)diff.TotalDays;
         }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         public static int ToUnixDays(this DateOnly dto) {
             TimeSpan diff = new DateTime(dto.Year, dto.Month, dto.Day) - UnixEpoch;
             return (int)diff.TotalDays;

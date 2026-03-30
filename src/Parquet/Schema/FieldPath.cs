@@ -52,7 +52,7 @@ namespace Parquet.Schema {
         /// Convert to list
         /// </summary>
         /// <returns></returns>
-        public List<string> ToList() => [.. _parts];
+        public List<string> ToList() => new List<string>(_parts);
 
         /// <summary>
         /// Returns first part of the path, or null if path is empty

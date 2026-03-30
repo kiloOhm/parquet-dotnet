@@ -139,7 +139,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
             !string.IsNullOrWhiteSpace(_formatOptions.FooterEncryptionKey);
 
         // --- Create encrypter when needed ---
-        // EF mode → encrypter with FooterEncryptionKey (used for footer + pages).
+        // EF mode â†’ encrypter with FooterEncryptionKey (used for footer + pages).
         if(wantsEncryptedFooter) {
             (_encrypter, _cryptoMeta) = EncryptionBase.CreateEncryptorForWrite(
                 _formatOptions.FooterEncryptionKey!,
@@ -150,13 +150,13 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
             _encrypter = _encrypter ?? throw new InvalidOperationException("encrypter was not created");
             _cryptoMeta.KeyMetadata = _formatOptions.FooterEncryptionKeyMetadata;
         }
-        // PF mode → still create encrypter if any encryption is desired (column keys and/or footer-key pages).
+        // PF mode â†’ still create encrypter if any encryption is desired (column keys and/or footer-key pages).
         else if(_formatOptions.UsePlaintextFooter && (hasColumnKeys || wantsFooterKeyPagesInPF)) {
             // IMPORTANT: use FooterEncryptionKey for page encryption when present.
             string seedKey =
                 !string.IsNullOrWhiteSpace(_formatOptions.FooterEncryptionKey)
                     ? _formatOptions.FooterEncryptionKey!
-                    // no footer key → only column-key encryption; seed with random (column writers swap keys per column)
+                    // no footer key â†’ only column-key encryption; seed with random (column writers swap keys per column)
                     : BitConverter.ToString(CryptoHelpers.GetRandomBytes(32)).Replace("-", ""); // 256-bit random hex
 
             (_encrypter, _cryptoMeta) = EncryptionBase.CreateEncryptorForWrite(
@@ -247,7 +247,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
             byte[] footerBytes = ms.ToArray();
 
             if(_plaintextAlg is not null) {
-                // Signed plaintext footer (§5.5)
+                // Signed plaintext footer (Â§5.5)
                 if(_signer is null)
                     throw new InvalidOperationException("Signer missing in plaintext footer mode.");
 

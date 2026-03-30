@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -92,7 +92,7 @@ namespace Parquet.Extensions {
         /// <param name="token"></param>
         /// <returns>Number of bytes copied</returns>
         public static async ValueTask<int> CopyToAsync(this Stream s, Memory<byte> destination, CancellationToken token = default) {
-#if !NETSTANDARD2_0
+#if !NETSTANDARD2_0 && !NET48
             int remaining = destination.Length;
             int copied = 0;
             while(remaining > 0) {
@@ -103,6 +103,17 @@ namespace Parquet.Extensions {
                 remaining -= bytesRead;
             }
             return copied;
+#elif NET48
+            byte[] buffer = new byte[destination.Length];
+            int copied = 0;
+            while(copied < buffer.Length) {
+                int bytesRead = await s.ReadAsync(buffer, copied, buffer.Length - copied, token);
+                if(bytesRead == 0)
+                    break;
+                copied += bytesRead;
+            }
+            new ReadOnlySpan<byte>(buffer, 0, copied).CopyTo(destination.Span);
+            return copied;
 #else
             throw new NotImplementedException();
 #endif
@@ -110,8 +121,10 @@ namespace Parquet.Extensions {
 
         public static async ValueTask CopyToAsync(this Memory<byte> source, Stream destination,
             CancellationToken token = default) {
-#if !NETSTANDARD2_0
+#if !NETSTANDARD2_0 && !NET48
             await destination.WriteAsync(source);
+#elif NET48
+            await destination.WriteAsync(source.ToArray(), 0, source.Length, token);
 #else
             throw new NotImplementedException();
 #endif

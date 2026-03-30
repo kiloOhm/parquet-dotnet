@@ -38,6 +38,8 @@ namespace Parquet.Encryption {
 #if NET8_0_OR_GREATER
             using var gcm = new AesGcm(key, GcmTagSizeBytes);
             gcm.Encrypt(nonce, plaintext, ciphertext, tag, aad);
+#elif NET48
+            throw new PlatformNotSupportedException("AES-GCM is not available on .NET Framework 4.8.");
 #elif NET7_0_OR_GREATER || NET6_0_OR_GREATER || NET5_0_OR_GREATER || NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
             using var gcm = new AesGcm(key);
             gcm.Encrypt(nonce, plaintext, ciphertext, tag, aad);
@@ -56,6 +58,8 @@ namespace Parquet.Encryption {
 #if NET8_0_OR_GREATER
             using var gcm = new AesGcm(key, GcmTagSizeBytes);
             gcm.Decrypt(nonce, ciphertext, tag, plaintext, aad);
+#elif NET48
+            throw new PlatformNotSupportedException("AES-GCM is not available on .NET Framework 4.8.");
 #elif NET7_0_OR_GREATER || NET6_0_OR_GREATER || NET5_0_OR_GREATER || NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
             using var gcm = new AesGcm(key);
             gcm.Decrypt(nonce, ciphertext, tag, plaintext, aad);

@@ -1,4 +1,4 @@
-﻿using System.Numerics;
+using System.Numerics;
 using Parquet.Data;
 
 namespace System; 
@@ -18,7 +18,7 @@ internal static class SpanExtensions {
     }
 
     public static long ReadInt64(this Span<byte> span, int offset) {
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET48
         return BitConverter.ToInt64(span.Slice(offset, sizeof(long)).ToArray(), 0);
 #else
         return BitConverter.ToInt64(span.Slice(offset, sizeof(long)));
@@ -199,7 +199,7 @@ internal static class SpanExtensions {
         }
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     public static void MinMax(this ReadOnlySpan<DateOnly> span, out DateOnly min, out DateOnly max) {
         min = span.IsEmpty ? default(DateOnly) : span[0];
         max = min;

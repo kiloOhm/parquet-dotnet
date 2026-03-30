@@ -2,6 +2,7 @@
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Parquet.Compatibility;
 
 namespace Parquet.Extensions.Streaming;
 
@@ -26,14 +27,14 @@ internal class MeteredWriteStream : Stream {
 
     public override int Read(byte[] buffer, int offset, int count) => throw new NotImplementedException();
 
-#if !NETSTANDARD2_0
+#if !NET48 && !NETSTANDARD2_0
     public override int Read(Span<byte> buffer) => throw new NotImplementedException();
 #endif
 
     public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         => throw new NotImplementedException();
 
-#if !NETSTANDARD2_0
+#if !NET48 && !NETSTANDARD2_0
     public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         => throw new NotImplementedException();
 #endif
@@ -45,7 +46,7 @@ internal class MeteredWriteStream : Stream {
         _written += count;
     }
 
-#if !NETSTANDARD2_0
+#if !NET48 && !NETSTANDARD2_0
     public override void Write(ReadOnlySpan<byte> buffer) {
         _baseStream.Write(buffer);
         _written += buffer.Length;
@@ -57,7 +58,7 @@ internal class MeteredWriteStream : Stream {
         _written += count;
     }
 
-#if !NETSTANDARD2_0
+#if !NET48 && !NETSTANDARD2_0
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) {
         await _baseStream.WriteAsync(buffer, cancellationToken);
         _written += buffer.Length;
@@ -69,7 +70,7 @@ internal class MeteredWriteStream : Stream {
         _baseStream.WriteByte(value);
     }
 
-#if !NETSTANDARD2_0
+#if !NET48 && !NETSTANDARD2_0
     public override void CopyTo(Stream destination, int bufferSize) => throw new NotImplementedException();
 #endif
 
@@ -108,10 +109,12 @@ internal class MeteredWriteStream : Stream {
         if(disposing)                 _baseStream.Dispose();
     }
 
-#if !NETSTANDARD2_0
+#if !NET48 && !NETSTANDARD2_0
     public override async ValueTask DisposeAsync() {
         await base.DisposeAsync();
         await _baseStream.DisposeAsync();
     }
+#else
+    public ValueTask DisposeAsync() => AsyncCompatibility.DisposeAsync(_baseStream);
 #endif
 }

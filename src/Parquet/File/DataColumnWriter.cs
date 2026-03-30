@@ -107,7 +107,7 @@ class DataColumnWriter {
                 };
                 encrForThisColumn = _footer.Encrypter;
             } else {
-                // PF + no footer key → plaintext column (do NOT advertise crypto metadata)
+                // PF + no footer key â†’ plaintext column (do NOT advertise crypto metadata)
                 chunk.CryptoMetadata = null;
                 encrForThisColumn = null;
             }
@@ -543,7 +543,7 @@ class DataColumnWriter {
             ParquetPlainEncoder.FillStats(((float[])data).AsSpan(offset, count), stats);
         } else if(dataType == typeof(DateTime[])) {
             ParquetPlainEncoder.FillStats(((DateTime[])data).AsSpan(offset, count), stats);
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         } else if(dataType == typeof(DateOnly[])) {
             ParquetPlainEncoder.FillStats(((DateOnly[])data).AsSpan(offset, count), stats);
         } else if(dataType == typeof(TimeOnly[])) {

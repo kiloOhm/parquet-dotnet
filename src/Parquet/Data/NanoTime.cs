@@ -14,7 +14,7 @@ class NanoTime {
     }
 
     public NanoTime(Span<byte> span) {
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET48
         byte[] data = span.ToArray();
         _timeOfDayNanos = BitConverter.ToInt64(data, 0);
         _julianDay = BitConverter.ToInt32(data, sizeof(long));

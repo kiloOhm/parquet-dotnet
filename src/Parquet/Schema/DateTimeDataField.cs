@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace Parquet.Schema {
     /// <summary>
@@ -39,7 +39,7 @@ namespace Parquet.Schema {
             if(format == DateTimeFormat.DateAndTime) {
                 Unit = DateTimeTimeUnit.Millis;
             }
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER || NET48
             else if(format == DateTimeFormat.DateAndTimeMicros) {
                 Unit = DateTimeTimeUnit.Micros;
             }

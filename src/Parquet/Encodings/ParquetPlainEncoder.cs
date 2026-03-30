@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.IO;
 using System.Numerics;
@@ -107,7 +107,7 @@ static class ParquetPlainEncoder {
             Encode(span, destination, tse);
             if(stats != null)
                 FillStats(span, stats);
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         } else if(t == typeof(DateOnly[])) {
             Span<DateOnly> span = ((DateOnly[])data).AsSpan(offset, count);
             Encode(span, destination, tse);
@@ -196,7 +196,7 @@ static class ParquetPlainEncoder {
         } else if(t == typeof(DateTime[])) {
             Span<DateTime> span = ((DateTime[])dest).AsSpan(offset, count);
             elementsRead = Decode(source, span, tse);
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         } else if(t == typeof(DateOnly[])) {
             Span<DateOnly> span = ((DateOnly[])dest).AsSpan(offset, count);
             elementsRead = Decode(source, span, tse);
@@ -276,7 +276,7 @@ static class ParquetPlainEncoder {
             return true;
         } else if(t == typeof(DateTime))
             return TryEncode((DateTime)value, tse, out result);
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
         else if(t == typeof(DateOnly))
             return TryEncode((DateOnly)value, tse, out result);
         else if(t == typeof(TimeOnly))
@@ -383,7 +383,7 @@ static class ParquetPlainEncoder {
         }
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     private static bool TryEncode(DateOnly value, SchemaElement tse, out byte[] result) {
         int days = value.ToUnixDays();
         result = BitConverter.GetBytes(days);
@@ -929,7 +929,7 @@ static class ParquetPlainEncoder {
         }
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     public static void Encode(ReadOnlySpan<DateOnly> data, Stream destination, SchemaElement tse) {
         foreach(DateOnly element in data) {
             int days = element.ToUnixDays();
@@ -1030,7 +1030,7 @@ static class ParquetPlainEncoder {
         }
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     public static int Decode(Span<byte> source, Span<DateOnly> data, SchemaElement tse) {
         int[] ints = ArrayPool<int>.Shared.Rent(data.Length);
         try {
@@ -1201,7 +1201,7 @@ static class ParquetPlainEncoder {
             int length = tse.TypeLength.Value;
 
             for(int spanIdx = 0; spanIdx < source.Length && i < data.Length; i++) {
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET48
                 data[i] = E.GetString(source.Slice(spanIdx, length).ToArray());
 #else
                 data[i] = E.GetString(source.Slice(spanIdx, length));
@@ -1214,7 +1214,7 @@ static class ParquetPlainEncoder {
             for(int spanIdx = 0; spanIdx < source.Length && i < data.Length; i++) {
                 int length = source.ReadInt32(spanIdx);
                 spanIdx += sizeof(int);
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET48
             data[i] = E.GetString(source.Slice(spanIdx, length).ToArray());
 #else
                 data[i] = E.GetString(source.Slice(spanIdx, length));
@@ -1239,7 +1239,7 @@ static class ParquetPlainEncoder {
     #region [ .NET differences ]
 
     private static void Write(Stream destination, ReadOnlySpan<byte> bytes) {
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET48
         byte[] tmp = bytes.ToArray();
         destination.Write(tmp, 0, tmp.Length);
 #else
@@ -1248,7 +1248,7 @@ static class ParquetPlainEncoder {
     }
 
     private static int Read(Stream source, Span<byte> bytes) {
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET48
         byte[] tmp = new byte[bytes.Length];
         int read = 0;
         while(read < tmp.Length) {
@@ -1368,7 +1368,7 @@ static class ParquetPlainEncoder {
         stats.MaxValue = max;
     }
 
-#if NET6_0_OR_GREATER
+#if NET6_0_OR_GREATER || NET48
     public static void FillStats(ReadOnlySpan<DateOnly> data, DataColumnStatistics stats) {
         data.MinMax(out DateOnly min, out DateOnly max);
         stats.MinValue = min;

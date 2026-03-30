@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Parquet.Schema;
 
 namespace Parquet.Serialization.Attributes; 
@@ -9,13 +9,13 @@ namespace Parquet.Serialization.Attributes;
 /// </summary>
 public enum ParquetTimestampResolution {
     /// <summary>
-    /// Milliseconds, maps to <see cref="DateTimeFormat.DateAndTime"/>"
+    /// Milliseconds, maps to <see cref="Parquet.Schema.DateTimeFormat.DateAndTime"/>"
     /// </summary>
     Milliseconds,
 
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER || NET48
     /// <summary>
-    /// Microseconds, maps to <see cref="DateTimeFormat.DateAndTimeMicros"/>"
+    /// Microseconds, maps to <see cref="Parquet.Schema.DateTimeFormat.DateAndTimeMicros"/>"
     /// </summary>
     Microseconds
 #endif
@@ -63,7 +63,7 @@ public class ParquetTimestampAttribute : Attribute {
         
         return Resolution switch {
             ParquetTimestampResolution.Milliseconds => DateTimeFormat.DateAndTime,
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER || NET48
             ParquetTimestampResolution.Microseconds => DateTimeFormat.DateAndTimeMicros,
 #endif
             _ => throw new NotSupportedException($"Timestamp resolution {Resolution} is not supported")
