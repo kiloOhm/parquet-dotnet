@@ -186,7 +186,7 @@ namespace Interop.Inspector {
             bool hex = footerKeyIsHex ?? false;
 
             if(footerKeyBytes != null) {
-                keyArg = "0x" + BytesToHex(footerKeyBytes);
+                keyArg = BytesToHex(footerKeyBytes);
                 hex = true;
             } else if(!string.IsNullOrEmpty(footerKeyUtf8OrHex)) {
                 keyArg = footerKeyUtf8OrHex!;

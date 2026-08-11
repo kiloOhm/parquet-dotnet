@@ -63,10 +63,10 @@ static class ThriftExtensions {
     }
 
     public static FieldPath GetPath(this ColumnChunk columnChunk) {
-        if(columnChunk.MetaData?.PathInSchema != null)
+        if(columnChunk.MetaData != null)
             return new FieldPath(columnChunk.MetaData.PathInSchema);
-        if(columnChunk.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY?.PathInSchema != null)
+        if(columnChunk.CryptoMetadata?.ENCRYPTIONWITHCOLUMNKEY != null)
             return new FieldPath(columnChunk.CryptoMetadata.ENCRYPTIONWITHCOLUMNKEY.PathInSchema);
-        throw new InvalidDataException("Unable to determine column path from ColumnChunk.");
+        throw new ParquetException("The column chunk does not contain a schema path.");
     }
 }
