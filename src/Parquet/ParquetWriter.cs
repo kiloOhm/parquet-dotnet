@@ -5,22 +5,21 @@ using System.IO.Compression;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Parquet.Schema;
-using Parquet.File;
-using Parquet.Meta;
 using Parquet.Extensions;
 using Parquet.Extensions.Streaming;
-using Parquet.Encryption;
+using Parquet.File;
+using Parquet.Meta;
+using Parquet.Schema;
 
 namespace Parquet;
 
 /// <summary>
 /// Implements Apache Parquet format writer
 /// </summary>
-public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable {
+public sealed class ParquetWriter : ParquetActor, IAsyncDisposable {
     private ThriftFooter? _footer;
     private readonly ParquetSchema _schema;
-    private readonly ParquetOptions _formatOptions;
+    private readonly ParquetOptions _options;
     private bool _dataWritten;
     private readonly List<ParquetRowGroupWriter> _openedWriters = new List<ParquetRowGroupWriter>();
     private EncryptionBase? _encrypter;
@@ -32,21 +31,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
     // holds AadPrefix/AadFileUnique to build AAD for signing
     private EncryptionBase? _signer;
 
-    /// <summary>
-    /// Type of compression to use, defaults to <see cref="CompressionMethod.Snappy"/>
-    /// </summary>
-    public CompressionMethod CompressionMethod { get; set; } = CompressionMethod.Snappy;
-
-    /// <summary>
-    /// Level of compression
-    /// </summary>
-#if NET6_0_OR_GREATER
-    public CompressionLevel CompressionLevel = CompressionLevel.SmallestSize;
-#else
-    public CompressionLevel CompressionLevel = CompressionLevel.Optimal;
-#endif
-
-    private ParquetWriter(ParquetSchema schema, Stream output, ParquetOptions? formatOptions = null, bool append = false)
+    private ParquetWriter(ParquetSchema schema, Stream output, ParquetOptions? options = null, bool append = false)
        : base(output.CanSeek == true ? output : new MeteredWriteStream(output)) {
         if(output == null)
             throw new ArgumentNullException(nameof(output));
@@ -54,7 +39,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
         if(!output.CanWrite)
             throw new ArgumentException("stream is not writeable", nameof(output));
         _schema = schema ?? throw new ArgumentNullException(nameof(schema));
-        _formatOptions = formatOptions ?? new ParquetOptions();
+        _options = options ?? new ParquetOptions();
     }
 
     /// <summary>
@@ -62,15 +47,15 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
     /// </summary>
     /// <param name="schema"></param>
     /// <param name="output">Writeable, seekable stream</param>
-    /// <param name="formatOptions">Additional options</param>
+    /// <param name="options">Additional options</param>
     /// <param name="append"></param>
     /// <param name="cancellationToken"></param>
     /// <exception cref="ArgumentNullException">Output is null.</exception>
     /// <exception cref="ArgumentException">Output stream is not writeable</exception>
     public static async Task<ParquetWriter> CreateAsync(
-        ParquetSchema schema, Stream output, ParquetOptions? formatOptions = null, bool append = false,
+        ParquetSchema schema, Stream output, ParquetOptions? options = null, bool append = false,
         CancellationToken cancellationToken = default) {
-        var writer = new ParquetWriter(schema, output, formatOptions, append);
+        var writer = new ParquetWriter(schema, output, options, append);
         await writer.PrepareFileAsync(append, cancellationToken);
         return writer;
     }
@@ -81,8 +66,7 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
     public ParquetRowGroupWriter CreateRowGroup() {
         _dataWritten = true;
 
-        var writer = new ParquetRowGroupWriter(_schema, Stream, _footer!,
-           CompressionMethod, _formatOptions, CompressionLevel);
+        var writer = new ParquetRowGroupWriter(Stream, _footer!, _options);
 
         _openedWriters.Add(writer);
 
@@ -179,10 +163,9 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
             bool encryptedFooterMode = _encrypter != null && !_formatOptions.UsePlaintextFooter;
             await WriteMagicAsync(encrypted: encryptedFooterMode);
         } else {
-            ValidateSchemasCompatible(_footer, _schema);
-            _footer.Add(0);
-            _footer.Encrypter = _encrypter; // ensure visibility if footer existed
-        }
+            if(_footer == null) {
+                // totalRowCount is set to 0 with expectation that it will be updated at the end of writing (see DisposeCore)
+                _footer = new ThriftFooter(_schema, 0, _options);
 
         // --- Plaintext footer (PF) signing setup (PAR1 tail, optional signature trailer) ---
         if(_formatOptions.UsePlaintextFooter && !string.IsNullOrWhiteSpace(_formatOptions.FooterSigningKey)) {
@@ -200,17 +183,14 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
                 _plaintextAlg = signMeta.EncryptionAlgorithm;        // no page encrypter (column-keys only)
             }
 
-            _signer = encTmp;                               // used later to sign the PF
-            _footer.SetPlaintextFooterAlgorithm(_plaintextAlg);
-
-            if(_formatOptions.FooterSigningKeyMetadata is { Length: > 0 }) {
-                _footer.SetFooterSigningKeyMetadata(_formatOptions.FooterSigningKeyMetadata);
+                // it's set to 0 with expectation that row count will be updated at the end of writing (see DisposeCore)
+                _footer.Add(0);
             }
         }
     }
 
     private void ValidateSchemasCompatible(ThriftFooter footer, ParquetSchema schema) {
-        ParquetSchema existingSchema = footer.CreateModelSchema(_formatOptions);
+        ParquetSchema existingSchema = footer.CreateModelSchema(_options);
 
         if(!schema.Equals(existingSchema)) {
             string reason = schema.GetNotEqualsMessage(existingSchema, "appending", "existing");
@@ -218,89 +198,13 @@ public sealed class ParquetWriter : ParquetActor, IDisposable, IAsyncDisposable 
         }
     }
 
-    private void WriteMagic(bool encrypted = false) => Stream.Write(encrypted ? MagicBytesEncrypted : MagicBytes, 0, MagicBytes.Length);
-    private Task WriteMagicAsync(bool encrypted = false) => Stream.WriteAsync(encrypted ? MagicBytesEncrypted : MagicBytes, 0, MagicBytes.Length);
+    private Task WriteMagicAsync() => Stream.WriteAsync(MagicBytes, 0, MagicBytes.Length);
 
     private void DisposeCore() {
         if(_dataWritten) {
             //update row count (on append add row count to existing metadata)
             _footer!.Add(_openedWriters.Sum(w => w.RowCount ?? 0));
         }
-    }
-
-    /// <summary>
-    /// Disposes the writer and writes the file footer.
-    /// </summary>
-    public void Dispose() {
-        DisposeCore();
-        if(_footer == null) {
-            return;
-        }
-
-        _footer.WritePageIndexes(Stream);
-
-        using var ms = new MemoryStream();
-
-        // --- Plaintext footer mode (always ends with PAR1) ---
-        if(_formatOptions.UsePlaintextFooter) {
-            _footer.Write(ms);
-            byte[] footerBytes = ms.ToArray();
-
-            if(_plaintextAlg is not null) {
-                // Signed plaintext footer (Â§5.5)
-                if(_signer is null)
-                    throw new InvalidOperationException("Signer missing in plaintext footer mode.");
-
-                byte[] aad = (_encrypter ?? _signer)!.BuildAad(Meta.ParquetModules.Footer);
-
-                byte[] nonce12 = CryptoHelpers.GetRandomBytes(12);
-
-                byte[] tag = new byte[16];
-                byte[] tmpCt = new byte[footerBytes.Length];
-
-                CryptoHelpers.GcmEncryptOrThrow(_signer.FooterEncryptionKey!, nonce12, footerBytes, tmpCt, tag, aad);
-
-                // [footer][nonce|tag][len=footer+28][PAR1]
-                Stream.Write(footerBytes, 0, footerBytes.Length);
-                Stream.Write(nonce12, 0, nonce12.Length);
-                Stream.Write(tag, 0, tag.Length);
-                Stream.WriteInt32(footerBytes.Length + 28);
-                WriteMagic(false);
-                Stream.Flush();
-                return;
-            } else {
-                // Legacy plaintext footer (unsigned)
-                Stream.Write(footerBytes, 0, footerBytes.Length);
-                Stream.WriteInt32(footerBytes.Length);
-                WriteMagic(false);
-                Stream.Flush();
-                return;
-            }
-        }
-
-        // --- Encrypted footer mode (PARE) ---
-        if(_encrypter is not null) {
-            _footer.Write(ms);
-            byte[] encFooter = _encrypter.EncryptFooter(ms.ToArray());
-
-            using var metaMs = new MemoryStream();
-            var metaWriter = new Parquet.Meta.Proto.ThriftCompactProtocolWriter(metaMs);
-            _cryptoMeta!.Write(metaWriter);
-            byte[] metaBytes = metaMs.ToArray();
-
-            Stream.Write(metaBytes, 0, metaBytes.Length);
-            Stream.Write(encFooter, 0, encFooter.Length);
-            Stream.WriteInt32(metaBytes.Length + encFooter.Length);
-            WriteMagic(true);
-            Stream.Flush();
-            return;
-        }
-
-        // --- Legacy plaintext footer (no encryption anywhere) ---
-        long size = _footer.Write(Stream);
-        Stream.WriteInt32((int)size);
-        WriteMagic(false);
-        Stream.Flush();
     }
 
     /// <summary>

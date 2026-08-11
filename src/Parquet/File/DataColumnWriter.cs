@@ -8,7 +8,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.IO;
 using Parquet.Bloom;
-using Parquet.Data;
 using Parquet.Encodings;
 using Parquet.Encryption;
 using Parquet.Extensions;
@@ -21,8 +20,6 @@ class DataColumnWriter {
     private readonly Stream _stream;
     private readonly ThriftFooter _footer;
     private readonly SchemaElement _schemaElement;
-    private readonly CompressionMethod _compressionMethod;
-    private readonly CompressionLevel _compressionLevel;
     private readonly Dictionary<string, string>? _keyValueMetadata;
     private readonly ParquetOptions _options;
     private static readonly RecyclableMemoryStreamManager _rmsMgr = new RecyclableMemoryStreamManager();
@@ -34,17 +31,11 @@ class DataColumnWriter {
        Stream stream,
        ThriftFooter footer,
        SchemaElement schemaElement,
-       CompressionMethod compressionMethod,
        ParquetOptions options,
-       CompressionLevel compressionLevel,
-       Dictionary<string, string>? keyValueMetadata,
-       short rowGroupOrdinal = 0,
-       short columnOrdinal = 0) {
+       Dictionary<string, string>? keyValueMetadata) {
         _stream = stream;
         _footer = footer;
         _schemaElement = schemaElement;
-        _compressionMethod = compressionMethod;
-        _compressionLevel = compressionLevel;
         _keyValueMetadata = keyValueMetadata;
         _options = options;
         _rmsMgr.Settings.MaximumSmallPoolFreeBytes = options.MaximumSmallPoolFreeBytes;
@@ -54,86 +45,26 @@ class DataColumnWriter {
         _pageOrdinal = 0;
     }
 
-    public async Task<ColumnChunk> WriteAsync(
+    public async Task<ColumnChunk> WriteAsync<T>(
         FieldPath fullPath,
-        DataColumn column,
-        CancellationToken cancellationToken = default
-    ) {
-        if(column == null)
-            throw new ArgumentNullException(nameof(column));
-        column.Field.EnsureAttachedToSchema(nameof(column));
-
+        WritingColumn<T> wc,
+        CancellationToken cancellationToken) where T : struct {
+        // Num_values in the chunk does include null values - I have validated this by dumping spark-generated file.
         ColumnChunk chunk = _footer.CreateColumnChunk(
-            _compressionMethod, _stream, _schemaElement.Type!.Value, fullPath, column.NumValues, _keyValueMetadata);
+            _options.CompressionMethod, _stream, _schemaElement.Type!.Value, fullPath, wc.NumValues,
+            _keyValueMetadata);
+        if(chunk.MetaData == null)
+            throw new InvalidDataException($"{nameof(chunk.MetaData)} can not be null");
 
-        // Global flags
-        bool writerHasEncrypter = _footer.Encrypter is not null;
-        bool encryptedFooterMode = writerHasEncrypter && !(_options?.UsePlaintextFooter ?? false);
+        ColumnMetrics metrics = await WriteAsync(
+            chunk, wc, _schemaElement,
+            cancellationToken);
+        chunk.MetaData.Encodings = metrics.GetUsedEncodings();
 
-        // Per-column selection
-        bool useColumnKey = false;
-        byte[]? columnKeyBytes = null;
-        byte[]? columnKeyMetadata = null;
+        //generate stats for column chunk
+        chunk.MetaData.Statistics = wc.Statistics.ToThriftStatistics(_schemaElement);
 
-        // A footer key is considered "available" only if explicitly set in options
-        bool footerKeyAvailable = !string.IsNullOrWhiteSpace(_options?.FooterEncryptionKey);
-
-        // Decide crypto metadata + which encrypter instance to use for THIS column
-        Encryption.EncryptionBase? encrForThisColumn = null;
-
-        if(writerHasEncrypter) {
-            string pathStr = string.Join(".", fullPath.ToList());
-
-            if(_options?.ColumnKeys != null &&
-                _options.ColumnKeys.TryGetValue(pathStr, out ParquetOptions.ColumnKeySpec? spec)) {
-                // Column-key column
-                useColumnKey = true;
-                columnKeyBytes = Encryption.EncryptionBase.ParseKeyString(spec.Key);
-                columnKeyMetadata = spec.KeyMetadata;
-
-                chunk.CryptoMetadata = new ColumnCryptoMetaData {
-                    ENCRYPTIONWITHCOLUMNKEY = new EncryptionWithColumnKey {
-                        PathInSchema = fullPath.ToList(),
-                        KeyMetadata = columnKeyMetadata
-                    }
-                };
-
-                // We'll swap the key on the shared encrypter for this column
-                encrForThisColumn = _footer.Encrypter;
-            } else if(footerKeyAvailable) {
-                // Footer-key column (only if footer key really exists)
-                chunk.CryptoMetadata = new ColumnCryptoMetaData {
-                    ENCRYPTIONWITHFOOTERKEY = new EncryptionWithFooterKey()
-                };
-                encrForThisColumn = _footer.Encrypter;
-            } else {
-                // PF + no footer key â†’ plaintext column (do NOT advertise crypto metadata)
-                chunk.CryptoMetadata = null;
-                encrForThisColumn = null;
-            }
-        }
-
-        // If using a column key, temporarily swap it onto the encrypter instance
-        byte[]? originalKey = null;
-        if(useColumnKey && encrForThisColumn is not null) {
-            originalKey = _footer.Encrypter!.FooterEncryptionKey;
-            _footer.Encrypter.FooterEncryptionKey = columnKeyBytes!;
-        }
-
-        ColumnMetrics metrics;
-        try {
-            // Writes dictionary + data pages using encrForThisColumn (null => plaintext)
-            metrics = await WriteColumnAsync(chunk, column, _schemaElement, encrForThisColumn, cancellationToken);
-        } finally {
-            if(useColumnKey && encrForThisColumn is not null) {
-                _footer.Encrypter!.FooterEncryptionKey = originalKey!;
-            }
-        }
-
-        chunk.MetaData!.Encodings = metrics.GetUsedEncodings();
-
-        // Populate plaintext ColumnMetaData (in-memory)
-        chunk.MetaData.Statistics = column.Statistics.ToThriftStatistics(_schemaElement);
+        //the following counters must include both data size and header size
         chunk.MetaData.TotalCompressedSize = metrics.CompressedSize;
         chunk.MetaData.TotalUncompressedSize = metrics.UncompressedSize;
 
@@ -224,7 +155,7 @@ class DataColumnWriter {
 
         int uncompressedLength = (int)uncompressedData.Length;
         using IMemoryOwner<byte> pageData = await Compressor.Instance.CompressAsync(
-            _compressionMethod, _compressionLevel, uncompressedData);
+            _options.CompressionMethod, _options.CompressionLevel, uncompressedData);
         int compressedLength = pageData.Memory.Length;
         long pageOffset = _stream.Position;
 
@@ -289,417 +220,132 @@ class DataColumnWriter {
         };
     }
 
-    private async Task<ColumnMetrics> WriteColumnAsync(
-        ColumnChunk chunk, DataColumn column,
+    private async Task<ColumnMetrics> WriteAsync<T>(ColumnChunk chunk,
+        WritingColumn<T> wc,
         SchemaElement tse,
-        Encryption.EncryptionBase? encrForThisColumn,
-        CancellationToken cancellationToken = default) {
+        CancellationToken cancellationToken) where T : struct {
 
-        column.Field.EnsureAttachedToSchema(nameof(column));
+        wc.Field.EnsureAttachedToSchema(nameof(wc.Field));
+        wc.Pack(_options);
 
         var r = new ColumnMetrics();
-
-        using var pc = new PackedColumn(column);
-        pc.Pack(_options.UseDictionaryEncoding, _options.DictionaryEncodingThreshold);
-        PopulateColumnStatistics(pc, column);
-
-        // Bloom filter setup
         BloomCollector? bloom = null;
-        if(_options.BloomFilterOptionsByColumn.TryGetValue(column.Field.Name, out ParquetOptions.BloomFilterOptions? bloomOptions)) {
-            if(bloomOptions != null && bloomOptions.EnableBloomFilters) {
-                BloomSizing.BloomPlan plan = BloomSizing.Plan(
-                    estimatedDistinctValues: column.Statistics?.DistinctCount ?? column.NumValues,
-                    targetFpp: bloomOptions.BloomFilterFpp,
-                    bitsPerValueOverride: bloomOptions.BloomFilterBitsPerValueOverride);
-                bloom = new BloomCollector(plan.Blocks);
-            }
+        if(_options.BloomFilterOptionsByColumn.TryGetValue(wc.Field.Name, out ParquetOptions.BloomFilterOptions? bloomOptions)
+            && bloomOptions.EnableBloomFilters) {
+            BloomSizing.BloomPlan plan = BloomSizing.Plan(
+                wc.Statistics.DistinctCount ?? wc.Values.Length,
+                bloomOptions.BloomFilterFpp,
+                bloomOptions.BloomFilterBitsPerValueOverride);
+            bloom = new BloomCollector(plan.Blocks);
+            BloomAddValues(bloom, wc.Values, tse);
         }
+
+        /*
+         * Page header must preceeed actual data (compressed or not) however it contains both
+         * the uncompressed and compressed data size which we don't know! This somehow limits
+         * the write efficiency.
+         */
 
         // dictionary page
-        if(pc.HasDictionary) {
-            chunk.MetaData!.DictionaryPageOffset = _stream.Position;
-            PageHeader ph = _footer.CreateDictionaryPage(pc.Dictionary!.Length, out _);
+        if(wc.HasDictionary) {
+            PageHeader ph = _footer.CreateDictionaryPage(wc.Dictionary.Length, out _);
             r.Pages.Add(ph);
             using MemoryStream ms = _rmsMgr.GetStream();
-            ParquetPlainEncoder.Encode(pc.Dictionary, 0, pc.Dictionary.Length,
-                   tse,
-                   ms, column.Statistics);
-
-            await CompressAndWriteAsync(ph, ms, r, encrForThisColumn, cancellationToken);
-
-            // Feed dictionary values into bloom
-            if(bloom != null) {
-                BloomAddValues(bloom, pc.Dictionary, 0, pc.Dictionary.Length, _schemaElement);
-            }
+            ParquetPlainEncoder.Encode(wc.Dictionary, ms, tse, wc.Statistics);
+            await CompressAndWriteAsync(ph, ms, r, cancellationToken);
         }
 
-        Array data = pc.GetPlainData(out _, out int definedValueCount);
-        Array definedData = column.DefinedData;
-        if(bloom != null && !pc.HasDictionary) {
-            BloomAddValues(bloom, data, 0, definedValueCount, _schemaElement);
-        }
+        // data page
+        using(MemoryStream ms = _rmsMgr.GetStream()) {
+            bool deltaEncode = _options.GetEncodingHint(wc.Field) == EncodingHint.DeltaBinaryPacked && DeltaBinaryPackedEncoder.CanEncode(wc.Values);
+            bool byteSplitStreamEncode = _options.GetEncodingHint(wc.Field) == EncodingHint.ByteSplitStream && ByteStreamSplitEncoder.IsSupported(typeof(T));
 
-        int[]? dictionaryIndexes = pc.HasDictionary
-            ? pc.GetDictionaryIndexes(out _)
-            : null;
-
-        bool wroteDataPageOffset = false;
-        foreach(PageSlice slice in BuildPageSlices(column, pc)) {
-            using MemoryStream ms = _rmsMgr.GetStream();
-            if(!wroteDataPageOffset) {
-                chunk.MetaData!.DataPageOffset = _stream.Position;
-                wroteDataPageOffset = true;
-            }
-
-            bool deltaEncode = !pc.HasDictionary &&
-                column.IsDeltaEncodable &&
-                _options.UseDeltaBinaryPackedEncoding &&
-                DeltaBinaryPackedEncoder.CanEncode(data, slice.DefinedValueOffset, slice.DefinedValueCount);
-
-            PageHeader ph = _footer.CreateDataPage(slice.ValueCount, pc.HasDictionary, deltaEncode, out DataPageHeader dph);
+            // data page Num_values also does include NULLs
+            PageHeader ph = _footer.CreateDataPage(wc.NumValues, wc.HasDictionary, deltaEncode, byteSplitStreamEncode, out DataPageHeader dph);
             r.Pages.Add(ph);
 
-            if(pc.HasRepetitionLevels) {
-                WriteLevels(ms, pc.RepetitionLevels!, slice.ValueOffset, slice.ValueCount, column.Field.MaxRepetitionLevel);
+            if(wc.HasRepetitionLevels) {
+                WriteLevels(ms, wc.RepetitionLevels!, wc.Field.MaxRepetitionLevel);
             }
-            if(pc.HasDefinitionLevels) {
-                WriteLevels(ms, pc.DefinitionLevels!, slice.ValueOffset, slice.ValueCount, column.Field.MaxDefinitionLevel);
+            if(wc.HasDefinitionLevels) {
+                WriteLevels(ms, wc.DefinitionLevels!, wc.Field.MaxDefinitionLevel);
             }
 
-            var pageStats = new DataColumnStatistics {
-                NullCount = slice.ValueCount - slice.DefinedValueCount
-            };
-
-            if(pc.HasDictionary) {
-                int bitWidth = pc.Dictionary!.Length.GetBitWidth();
+            if(wc.HasDictionary) {
+                // dictionary indexes are always encoded with RLE
+                int bitWidth = wc.Dictionary.Length.GetBitWidth();  // bit width is determined by the dictionary size
                 ms.WriteByte((byte)bitWidth);   // bit width is stored as 1 byte before encoded data
-                RleBitpackedHybridEncoder.Encode(ms, dictionaryIndexes!.AsSpan(slice.DefinedValueOffset, slice.DefinedValueCount), bitWidth);
-                TryFillStats(definedData, slice.DefinedValueOffset, slice.DefinedValueCount, pageStats);
-            } else if(deltaEncode) {
-                DeltaBinaryPackedEncoder.Encode(data, slice.DefinedValueOffset, slice.DefinedValueCount, ms, pageStats);
+                RleBitpackedHybridEncoder.Encode(ms, wc.DictionaryIndexes, bitWidth);
             } else {
-                ParquetPlainEncoder.Encode(data, slice.DefinedValueOffset, slice.DefinedValueCount, tse, ms, pageStats);
+                if(deltaEncode) {
+                    DeltaBinaryPackedEncoder.Encode(wc.Values, ms, wc.Statistics);
+                } else if(byteSplitStreamEncode) {
+                    ByteStreamSplitEncoder.Encode(wc.Values, ms);
+                } else {
+                    ParquetPlainEncoder.Encode(wc.Values,
+                        ms,
+                        tse,
+                        wc.HasDictionary ? null : wc.Statistics);
+                }
             }
 
-            dph.Statistics = pageStats.ToThriftStatistics(tse);
-            PageWriteMetrics pageMetrics = await CompressAndWriteAsync(ph, ms, r, encrForThisColumn, cancellationToken);
-            r.DataPages.Add(new PageIndexEntry {
-                Location = new PageLocation {
-                    Offset = pageMetrics.Offset,
-                    CompressedPageSize = pageMetrics.TotalSize,
-                    FirstRowIndex = slice.FirstRowIndex
-                },
-                Statistics = dph.Statistics,
-                ValueCount = slice.ValueCount
-            });
-            _pageOrdinal++;
+            dph.Statistics = wc.Statistics.ToThriftStatistics(tse);
+            await CompressAndWriteAsync(ph, ms, r, cancellationToken);
         }
 
-        RegisterPageIndexes(chunk, r, encrForThisColumn);
-
-        // Write bloom filter after all pages
-        if(bloom != null && chunk?.MetaData != null) {
+        if(bloom != null && chunk.MetaData != null) {
             BloomFilterIO.WriteToStream(
                 _stream,
                 bloom.Filter,
                 chunk.MetaData,
-                s => new Meta.Proto.ThriftCompactProtocolWriter(s),
-                encrForThisColumn,
-                _rowGroupOrdinal,
-                _columnOrdinal);
+                stream => new Meta.Proto.ThriftCompactProtocolWriter(stream));
         }
 
         return r;
     }
 
-    private IReadOnlyList<PageSlice> BuildPageSlices(DataColumn column, PackedColumn packedColumn) {
-        int pageRowCountLimit = _options.DataPageRowCountLimit;
-        if(pageRowCountLimit <= 0)
-            throw new ArgumentOutOfRangeException(nameof(_options.DataPageRowCountLimit), pageRowCountLimit,
-                "DataPageRowCountLimit must be greater than zero.");
-
-        int totalValueCount = column.NumValues;
-        int[]? definitionLevels = packedColumn.DefinitionLevels;
-        int[] definedValueOffsets = BuildDefinedValueOffsets(definitionLevels, column.Field.MaxDefinitionLevel, totalValueCount);
-        var slices = new List<PageSlice>();
-
-        void AddSlice(int valueOffset, int valueCount, long firstRowIndex, int rowCount) {
-            int definedValueOffset = definedValueOffsets[valueOffset];
-            int definedValueCount = definedValueOffsets[valueOffset + valueCount] - definedValueOffset;
-            slices.Add(new PageSlice {
-                ValueOffset = valueOffset,
-                ValueCount = valueCount,
-                DefinedValueOffset = definedValueOffset,
-                DefinedValueCount = definedValueCount,
-                FirstRowIndex = firstRowIndex
-            });
-        }
-
-        if(totalValueCount == 0) {
-            AddSlice(0, 0, 0, 0);
-            return slices;
-        }
-
-        if(!packedColumn.HasRepetitionLevels) {
-            long firstRowIndex = 0;
-            for(int valueOffset = 0; valueOffset < totalValueCount;) {
-                int rowCount = Math.Min(pageRowCountLimit, totalValueCount - valueOffset);
-                AddSlice(valueOffset, rowCount, firstRowIndex, rowCount);
-                valueOffset += rowCount;
-                firstRowIndex += rowCount;
+    private static void BloomAddValues<T>(BloomCollector bloom, ReadOnlySpan<T> values, SchemaElement schemaElement)
+        where T : struct {
+        foreach(T value in values) {
+            object boxed = value;
+            switch(schemaElement.Type!.Value) {
+                case Meta.Type.BOOLEAN:
+                    bloom.AddBoolean(Convert.ToBoolean(boxed));
+                    break;
+                case Meta.Type.INT32:
+                    bloom.AddInt32(boxed is uint uintValue ? unchecked((int)uintValue) : Convert.ToInt32(boxed));
+                    break;
+                case Meta.Type.INT64:
+                    bloom.AddInt64(boxed is ulong ulongValue ? unchecked((long)ulongValue) : Convert.ToInt64(boxed));
+                    break;
+                case Meta.Type.INT96:
+                    if(boxed is DateTime dateTime)
+                        bloom.AddInt96(dateTime);
+                    break;
+                case Meta.Type.FLOAT:
+                    bloom.AddFloat(Convert.ToSingle(boxed));
+                    break;
+                case Meta.Type.DOUBLE:
+                    bloom.AddDouble(Convert.ToDouble(boxed));
+                    break;
+                case Meta.Type.BYTE_ARRAY:
+                    if(boxed is ReadOnlyMemory<char> chars)
+                        bloom.AddString(chars.ToString());
+                    else if(boxed is ReadOnlyMemory<byte> bytes)
+                        bloom.AddByteArray(bytes.ToArray());
+                    break;
+                case Meta.Type.FIXED_LEN_BYTE_ARRAY:
+                    if(boxed is ReadOnlyMemory<byte> fixedBytes)
+                        bloom.AddFixed(fixedBytes.ToArray());
+                    else if(boxed is Guid guid)
+                        bloom.AddFixed(guid.ToByteArray());
+                    break;
             }
-            return slices;
-        }
-
-        int[] repetitionLevels = packedColumn.RepetitionLevels!;
-        int pageStart = 0;
-        long currentFirstRowIndex = 0;
-
-        while(pageStart < totalValueCount) {
-            int pageEnd = pageStart;
-            int rowCount = 0;
-
-            while(pageEnd < totalValueCount) {
-                if(repetitionLevels[pageEnd] == 0) {
-                    if(rowCount == pageRowCountLimit && pageEnd > pageStart)
-                        break;
-                    rowCount++;
-                }
-                pageEnd++;
-            }
-
-            AddSlice(pageStart, pageEnd - pageStart, currentFirstRowIndex, rowCount);
-            pageStart = pageEnd;
-            currentFirstRowIndex += rowCount;
-        }
-
-        return slices;
-    }
-
-    private static int[] BuildDefinedValueOffsets(int[]? definitionLevels, int maxDefinitionLevel, int totalValueCount) {
-        var offsets = new int[totalValueCount + 1];
-        if(definitionLevels == null) {
-            for(int i = 0; i <= totalValueCount; i++) {
-                offsets[i] = i;
-            }
-            return offsets;
-        }
-
-        for(int i = 0; i < totalValueCount; i++) {
-            offsets[i + 1] = offsets[i] + (definitionLevels[i] == maxDefinitionLevel ? 1 : 0);
-        }
-
-        return offsets;
-    }
-
-    private static void PopulateColumnStatistics(PackedColumn packedColumn, DataColumn column) {
-        Array statsSource = packedColumn.HasDictionary
-            ? packedColumn.Dictionary!
-            : packedColumn.GetPlainData(out _, out _);
-
-        int statsCount = packedColumn.HasDictionary
-            ? packedColumn.Dictionary!.Length
-            : column.DefinedData.Length;
-
-        column.Statistics.MinValue = null;
-        column.Statistics.MaxValue = null;
-        TryFillStats(statsSource, 0, statsCount, column.Statistics);
-    }
-
-    private static void TryFillStats(Array data, int offset, int count, DataColumnStatistics stats) {
-        if(count <= 0)
-            return;
-        if(offset < 0 || offset > data.Length || count > data.Length - offset) {
-            throw new ArgumentOutOfRangeException(nameof(count),
-                $"Invalid stats slice: offset={offset}, count={count}, length={data.Length}, type={data.GetType().FullName}");
-        }
-
-        System.Type dataType = data.GetType();
-        if(dataType == typeof(byte[])) {
-            ParquetPlainEncoder.FillStats(((byte[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(sbyte[])) {
-            ParquetPlainEncoder.FillStats(((sbyte[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(short[])) {
-            ParquetPlainEncoder.FillStats(((short[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(ushort[])) {
-            ParquetPlainEncoder.FillStats(((ushort[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(int[])) {
-            ParquetPlainEncoder.FillStats(((int[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(uint[])) {
-            ParquetPlainEncoder.FillStats(((uint[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(long[])) {
-            ParquetPlainEncoder.FillStats(((long[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(ulong[])) {
-            ParquetPlainEncoder.FillStats(((ulong[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(System.Numerics.BigInteger[])) {
-            ParquetPlainEncoder.FillStats(((System.Numerics.BigInteger[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(decimal[])) {
-            ParquetPlainEncoder.FillStats(((decimal[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(BigDecimal[])) {
-            ParquetPlainEncoder.FillStats(((BigDecimal[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(double[])) {
-            ParquetPlainEncoder.FillStats(((double[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(float[])) {
-            ParquetPlainEncoder.FillStats(((float[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(DateTime[])) {
-            ParquetPlainEncoder.FillStats(((DateTime[])data).AsSpan(offset, count), stats);
-#if NET6_0_OR_GREATER || NET48
-        } else if(dataType == typeof(DateOnly[])) {
-            ParquetPlainEncoder.FillStats(((DateOnly[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(TimeOnly[])) {
-            ParquetPlainEncoder.FillStats(((TimeOnly[])data).AsSpan(offset, count), stats);
-#endif
-        } else if(dataType == typeof(TimeSpan[])) {
-            ParquetPlainEncoder.FillStats(((TimeSpan[])data).AsSpan(offset, count), stats);
-        } else if(dataType == typeof(string[])) {
-            ParquetPlainEncoder.FillStats(((string[])data).AsSpan(offset, count), stats);
         }
     }
 
-    private void RegisterPageIndexes(
-        ColumnChunk chunk,
-        ColumnMetrics metrics,
-        Encryption.EncryptionBase? encrForThisColumn) {
-        if(metrics.DataPages.Count == 0)
-            return;
-
-        var offsetIndex = new OffsetIndex {
-            PageLocations = metrics.DataPages.Select(dp => dp.Location).ToList()
-        };
-
-        if(metrics.DataPages.Any(dp => dp.UnencodedByteArrayDataBytes.HasValue)) {
-            offsetIndex.UnencodedByteArrayDataBytes = metrics.DataPages
-                .Select(dp => dp.UnencodedByteArrayDataBytes ?? 0L)
-                .ToList();
-        }
-
-        ColumnIndex? columnIndex = TryBuildColumnIndex(metrics);
-        _footer.RegisterPageIndex(
-            chunk,
-            offsetIndex,
-            columnIndex,
-            encrForThisColumn,
-            _rowGroupOrdinal,
-            _columnOrdinal);
-    }
-
-    private static ColumnIndex? TryBuildColumnIndex(ColumnMetrics metrics) {
-        if(metrics.DataPages.Count == 0)
-            return null;
-
-        var nullPages = new List<bool>(metrics.DataPages.Count);
-        var minValues = new List<byte[]>(metrics.DataPages.Count);
-        var maxValues = new List<byte[]>(metrics.DataPages.Count);
-        var nullCounts = new List<long>(metrics.DataPages.Count);
-
-        foreach(PageIndexEntry page in metrics.DataPages) {
-            Statistics? stats = page.Statistics;
-            if(stats == null)
-                return null;
-
-            bool isNullPage = stats.NullCount.HasValue
-                && stats.NullCount.Value == page.ValueCount
-                && stats.MinValue == null
-                && stats.MaxValue == null;
-
-            if(!isNullPage && (stats.MinValue == null || stats.MaxValue == null))
-                return null;
-
-            nullPages.Add(isNullPage);
-            minValues.Add(isNullPage ? Array.Empty<byte>() : stats.MinValue!);
-            maxValues.Add(isNullPage ? Array.Empty<byte>() : stats.MaxValue!);
-            nullCounts.Add(stats.NullCount ?? 0);
-        }
-
-        return new ColumnIndex {
-            NullPages = nullPages,
-            MinValues = minValues,
-            MaxValues = maxValues,
-            BoundaryOrder = BoundaryOrder.UNORDERED,
-            NullCounts = nullCounts
-        };
-    }
-
-    private static int GetSerializedPageHeaderSize(PageHeader ph) {
-        using var ms = new MemoryStream();
-        ph.Write(new Meta.Proto.ThriftCompactProtocolWriter(ms));
-        return checked((int)ms.Length);
-    }
-
-    private static void WriteLevels(Stream s, int[] levels, int offset, int count, int maxValue) {
+    private static void WriteLevels(Stream s, ReadOnlySpan<int> levels, int maxValue) {
         int bitWidth = maxValue.GetBitWidth();
-        RleBitpackedHybridEncoder.EncodeWithLength(s, bitWidth, levels.AsSpan(offset, count));
-    }
-
-    private static void BloomAddValues(BloomCollector bloom, Array values, int offset, int count, SchemaElement tse) {
-        switch(tse.Type!.Value) {
-            case Meta.Type.BOOLEAN: {
-                    if(values is bool[] a)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddBoolean(a[offset + i]);
-                    break;
-                }
-            case Meta.Type.INT32: {
-                    if(values is int[] a)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddInt32(a[offset + i]);
-                    else if(values is uint[] au)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddInt32(unchecked((int)au[offset + i]));
-                    break;
-                }
-            case Meta.Type.INT64: {
-                    if(values is long[] a)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddInt64(a[offset + i]);
-                    else if(values is ulong[] au)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddInt64(unchecked((long)au[offset + i]));
-                    break;
-                }
-            case Meta.Type.INT96: {
-                    if(values is DateTime[] a)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddInt96(a[offset + i]);
-                    break;
-                }
-            case Meta.Type.FLOAT: {
-                    if(values is float[] a)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddFloat(a[offset + i]);
-                    break;
-                }
-            case Meta.Type.DOUBLE: {
-                    if(values is double[] a)
-                        for(int i = 0; i < count; i++)
-                            bloom.AddDouble(a[offset + i]);
-                    break;
-                }
-            case Meta.Type.BYTE_ARRAY: {
-                    if(values is string[] sa) {
-                        for(int i = 0; i < count; i++)
-                            bloom.AddString(sa[offset + i]);
-                    } else if(values is byte[][] ba) {
-                        for(int i = 0; i < count; i++)
-                            bloom.AddByteArray(ba[offset + i]);
-                    } else if(values is Array any && any.Length > 0 && any.GetValue(0) is byte[]) {
-                        for(int i = 0; i < count; i++)
-                            bloom.AddByteArray((byte[])any.GetValue(offset + i)!);
-                    }
-                    break;
-                }
-            case Meta.Type.FIXED_LEN_BYTE_ARRAY: {
-                    if(values is byte[][] ba) {
-                        for(int i = 0; i < count; i++)
-                            bloom.AddFixed(ba[offset + i]);
-                    } else if(values is Array any && any.Length > 0 && any.GetValue(0) is byte[]) {
-                        for(int i = 0; i < count; i++)
-                            bloom.AddFixed((byte[])any.GetValue(offset + i)!);
-                    }
-                    break;
-                }
-            default:
-                break;
-        }
+        RleBitpackedHybridEncoder.EncodeWithLength(s, bitWidth, levels);
     }
 }

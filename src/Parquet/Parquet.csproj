@@ -49,7 +49,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="CommunityToolkit.HighPerformance" Version="8.4.1" />
+        <PackageReference Include="CommunityToolkit.HighPerformance" Version="8.4.2" />
         <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
         <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
     </ItemGroup>
@@ -72,8 +72,11 @@
     <!-- Compression libraries -->
     <ItemGroup>
         <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
-        <PackageReference Include="Snappier" Version="1.3.0" />
-        <PackageReference Include="ZstdSharp.Port" Version="0.8.7" />
+        <PackageReference Include="Snappier" Version="1.3.1" />
+    </ItemGroup>
+
+    <ItemGroup Condition="('$(TargetFramework)' == 'net8.0') or ('$(TargetFramework)' == 'net10.0')">
+        <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
     </ItemGroup>
 
     <ItemGroup>
@@ -97,10 +100,6 @@
             <Generator>TextTemplatingFileGenerator</Generator>
             <LastGenOutput>RleBitpackedHybridEncoder.Variations.cs</LastGenOutput>
         </None>
-        <None Update="Extensions\UntypedArrayExtensions.tt">
-            <Generator>TextTemplatingFileGenerator</Generator>
-            <LastGenOutput>UntypedArrayExtensions.cs</LastGenOutput>
-        </None>
     </ItemGroup>
 
     <ItemGroup>
@@ -122,11 +121,6 @@
             <DesignTime>True</DesignTime>
             <AutoGen>True</AutoGen>
             <DependentUpon>RleBitpackedHybridEncoder.Variations.tt</DependentUpon>
-        </Compile>
-        <Compile Update="Extensions\UntypedArrayExtensions.cs">
-            <DesignTime>True</DesignTime>
-            <AutoGen>True</AutoGen>
-            <DependentUpon>UntypedArrayExtensions.tt</DependentUpon>
         </Compile>
         <Compile Update="Encodings\BitPackedEncoder.cs">
             <AutoGen>True</AutoGen>

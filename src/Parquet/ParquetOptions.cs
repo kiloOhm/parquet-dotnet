@@ -1,243 +1,177 @@
 using System;
 using System.Collections.Generic;
-using System.Data;
+using System.IO.Compression;
 using Parquet.Data;
+using Parquet.Schema;
+using Parquet.Serialization;
 
-namespace Parquet {
+namespace Parquet;
+
+/// <summary>
+/// Parquet options
+/// </summary>
+public class ParquetOptions {
+
     /// <summary>
-    /// Parquet options
+    /// Compression method to use when writing, defaults to <see cref="CompressionMethod.Snappy"/>
     /// </summary>
-    public class ParquetOptions {
+    public CompressionMethod CompressionMethod { get; set; } = CompressionMethod.Snappy;
+
+    /// <summary>
+    /// Compression level to use when writing, defaults to <see cref="CompressionLevel.SmallestSize"/>. The actual
+    /// physical compression level varies based on the compression algorithm.
+    /// </summary>
+    public CompressionLevel CompressionLevel { get; set; } = CompressionLevel.Optimal;
+
+    /// <summary>
+    /// When true byte arrays will be treated as UTF-8 strings when reading files.
+    /// </summary>
+    public bool TreatByteArrayAsString { get; set; } = false;
+
+    /// <summary>
+    /// When true, big integers are always treated as dates when reading files.
+    /// </summary>
+    public bool TreatBigIntegersAsDates { get; set; } = true;
+
+    /// <summary>
+    /// When set to true, parquet dates will be deserialized as <see cref="DateOnly"/>, otherwise as
+    /// <see cref="DateTime"/> with missing time part.
+    /// </summary>
+    public bool UseDateOnlyTypeForDates { get; set; } = false;
+
+    /// <summary>
+    /// Specifies hints to the writers about which encoding to use for specific columns. To get column path use
+    /// <see cref="Field.Path"/> on <see cref="DataField"/>.
+    /// </summary>
+    public readonly IDictionary<string, EncodingHint> ColumnEncodingHints = new Dictionary<string, EncodingHint>();
+
+    internal EncodingHint GetEncodingHint(DataField df) =>
+        ColumnEncodingHints.TryGetValue(df.Path.ToString(), out EncodingHint hint) ? hint : EncodingHint.Default;
+
+    /// <summary>
+    /// Dictionary uniqueness threshold, which is a value from 0 (no unique values) to 1 (all values are unique)
+    /// indicating when dictionary encoding is applied. Uniqueness factor needs to be less or equal than this threshold.
+    /// </summary>
+    public double DictionaryEncodingThreshold { get; set; } = 0.8;
+
+    /// <summary>
+    /// Number of values to sample before attempting full dictionary encoding.
+    /// When the column has more values than this limit, a quick uniqueness check is performed
+    /// on the first <c>DictionaryEncodingSampleSize</c> values. If the sample exceeds
+    /// <see cref="DictionaryEncodingThreshold"/>, dictionary encoding is skipped entirely,
+    /// avoiding the expensive full-data scan.
+    /// Set to 0 to disable sampling and always scan the full column.
+    /// Default is 0 (disabled - full column scan, preserving pre-existing behavior).
+    /// </summary>
+    public int DictionaryEncodingSampleSize { get; set; } = 0;
+
+    /// <summary>
+    /// This option is passed to the <see cref="Microsoft.IO.RecyclableMemoryStreamManager"/>, which keeps a pool of
+    /// streams in memory for reuse. By default when this option is unset, the RecyclableStreamManager will keep an
+    /// unbounded amount of memory, which is "indistinguishable from a memory leak" per their documentation. This does
+    /// not restrict the size of the pool, but just allows the garbage collector to free unused memory over this limit.
+    /// You may want to adjust this smaller to reduce max memory usage, or larger to reduce garbage collection
+    /// frequency. Defaults to 16MB.
+    /// </summary>
+    public int MaximumSmallPoolFreeBytes { get; set; } = 16 * 1024 * 1024;
+
+    /// <summary>
+    /// This option is passed to the <see cref="Microsoft.IO.RecyclableMemoryStreamManager"/>, which keeps a pool of
+    /// streams in memory for reuse. By default when this option is unset, the RecyclableStreamManager will keep an
+    /// unbounded amount of memory, which is "indistinguishable from a memory leak" per their documentation. This does
+    /// not restrict the size of the pool, but just allows the garbage collector to free unused memory over this limit.
+    /// You may want to adjust this smaller to reduce max memory usage, or larger to reduce garbage collection
+    /// frequency. Defaults to 64MB.
+    /// </summary>
+    public int MaximumLargePoolFreeBytes { get; set; } = 64 * 1024 * 1024;
+
+    /// <summary>
+    /// Gets the Bloom filter options keyed by column name.
+    /// </summary>
+    public Dictionary<string, BloomFilterOptions> BloomFilterOptionsByColumn { get; set; } = new();
+
+    /// <summary>
+    /// Options for configuring Bloom filters in Parquet columns.
+    /// </summary>
+    public record BloomFilterOptions {
+        /// <summary>
+        /// Enables Bloom filter generation for the column.
+        /// </summary>
+        public bool EnableBloomFilters { get; set; } = true;
 
         /// <summary>
-        /// When true byte arrays will be treated as UTF-8 strings on read
+        /// Desired false-positive probability.
         /// </summary>
-        public bool TreatByteArrayAsString { get; set; } = false;
+        public float BloomFilterFpp { get; set; } = 0.01f;
 
         /// <summary>
-        /// Gets or sets a value indicating whether big integers are always treated as dates on read
+        /// Optional override for the number of bits per distinct value.
         /// </summary>
-        public bool TreatBigIntegersAsDates { get; set; } = true;
-
-#if NET6_0_OR_GREATER || NET48
-        /// <summary>
-        /// When set to true, parquet dates will be deserialized as <see cref="DateOnly"/>, otherwise
-        /// as <see cref="DateTime"/> with missing time part.
-        /// </summary>
-        public bool UseDateOnlyTypeForDates { get; set; } = false;
-
-        /// <summary>
-        /// When set to true, parquet times with millisecond precision will be deserialized as <see cref="TimeOnly"/>, otherwise
-        /// as <see cref="TimeSpan"/> with missing time part.
-        /// </summary>
-        public bool UseTimeOnlyTypeForTimeMillis { get; set; } = false;
-
-        /// <summary>
-        /// When set to true, parquet times with microsecond precision will be deserialized as <see cref="TimeOnly"/>, otherwise
-        /// as <see cref="TimeSpan"/> with missing time part.
-        /// </summary>
-        public bool UseTimeOnlyTypeForTimeMicros { get; set; } = false;
-#endif
-
-        /// <summary>
-        /// Whether to use dictionary encoding for columns if data meets <seealso cref="DictionaryEncodingThreshold"/>
-        /// The following CLR types are currently supported:
-        /// <see cref="string"/>, <see cref="DateTime"/>, <see cref="decimal"/>, <see cref="byte"/>, <see cref="short"/>, <see cref="ushort"/>, <see cref="int"/>, <see cref="uint"/>, <see cref="long"/>, <see cref="ulong"/>, <see cref="float"/>, <see cref="double"/>"/>
-        /// </summary>
-        public bool UseDictionaryEncoding { get; set; } = true;
-
-        /// <summary>
-        /// Dictionary uniqueness threshold, which is a value from 0 (no unique values) 
-        /// to 1 (all values are unique) indicating when dictionary encoding is applied.
-        /// Uniqueness factor needs to be less or equal than this threshold.
-        /// </summary>
-        public double DictionaryEncodingThreshold { get; set; } = 0.8;
-
-        /// <summary>
-        /// When set, the default encoding for INT32 and INT64 is <see cref="Parquet.Meta.Encoding.DELTA_BINARY_PACKED"/>, otherwise
-        /// it's reverted to <see cref="Parquet.Meta.Encoding.PLAIN"/>. You should only set this to <see langword="false"/> if
-        /// your readers do not understand it.
-        /// </summary>
-        public bool UseDeltaBinaryPackedEncoding { get; set; } = true;
-
-        /// <summary>
-        /// Maximum number of rows written to a single data page.
-        /// Pages are split on row boundaries so page indexes can expose valid <c>first_row_index</c> values.
-        /// </summary>
-        public int DataPageRowCountLimit { get; set; } = 20_000;
-
-        /// <summary>
-        /// This option is passed to the <see cref="Microsoft.IO.RecyclableMemoryStreamManager"/> , 
-        /// which keeps a pool of streams in memory for reuse. 
-        /// By default when this option is unset, the RecyclableStreamManager 
-        /// will keep an unbounded amount of memory, which is 
-        /// "indistinguishable from a memory leak" per their documentation.
-        /// 
-        /// This does not restrict the size of the pool, but just allows 
-        /// the garbage collector to free unused memory over this limit.
-        /// 
-        /// You may want to adjust this smaller to reduce max memory usage, 
-        /// or larger to reduce garbage collection frequency.
-        /// 
-        /// Defaults to 16MB.  
-        /// </summary>
-        public int MaximumSmallPoolFreeBytes { get; set; } = 16 * 1024 * 1024;
-
-        /// <summary>
-        /// This option is passed to the <see cref="Microsoft.IO.RecyclableMemoryStreamManager"/> , 
-        /// which keeps a pool of streams in memory for reuse. 
-        /// By default when this option is unset, the RecyclableStreamManager 
-        /// will keep an unbounded amount of memory, which is 
-        /// "indistinguishable from a memory leak" per their documentation.
-        /// 
-        /// This does not restrict the size of the pool, but just allows 
-        /// the garbage collector to free unused memory over this limit.
-        /// 
-        /// You may want to adjust this smaller to reduce max memory usage, 
-        /// or larger to reduce garbage collection frequency.
-        /// 
-        /// Defaults to 64MB.
-        /// </summary>
-        public int MaximumLargePoolFreeBytes { get; set; } = 64 * 1024 * 1024;
-
-        /// <summary>
-        /// When true, decimals will be read and written as <see cref="BigDecimal"/> instead of <see cref="decimal"/>. This is required if you are working with truly large decimals.
-        /// </summary>
-        public bool UseBigDecimal { get; set; } = false;
-
-        internal Type DecimalType => UseBigDecimal ? typeof(BigDecimal) : typeof(decimal);
-
-        #region bloom filters
-
-        /// <summary>
-        /// Gets the bloom filter options for each column. The dictionary key is the column name,
-        /// and the value is the <see cref="BloomFilterOptions"/> for that column.
-        /// </summary>
-        public Dictionary<string, BloomFilterOptions> BloomFilterOptionsByColumn { get; set; } = new();
-
-        /// <summary>
-        /// Options for configuring bloom filters in Parquet columns.
-        /// </summary>
-        public record BloomFilterOptions {
-            /// <summary>
-            /// When set to true, enables bloom filters for columns to improve query performance by filtering out non-matching values.
-            /// </summary>
-            public bool EnableBloomFilters { get; set; } = true;
-
-            /// <summary>
-            /// False positive probability for bloom filters. This value determines the likelihood that the bloom filter will incorrectly indicate that a value is present.
-            /// Typical values are small (e.g., 0.01 for 1% false positive rate).
-            /// </summary>
-            public float BloomFilterFpp { get; set; } = 0.01f;
-
-            /// <summary>
-            /// When set, overrides the number of bits per value used in bloom filters for columns.
-            /// This allows fine-tuning of bloom filter size and performance. If not set, the default calculation is used.
-            /// </summary>
-            public int? BloomFilterBitsPerValueOverride { get; set; } = null;
-        }
-
-        #endregion bloom filters
-
-        #region modular encryption
-
-        /// <summary>
-        /// Write files using plaintext footer mode (§5.5). Footer is signed (GCM) not encrypted.
-        /// Magic stays PAR1 for legacy readers.
-        /// </summary>
-        public bool UsePlaintextFooter { get; set; } = false;
-
-        /// <summary>
-        /// Footer key for encrypted footer mode (PARE). If null and UsePlaintextFooter==true,
-        /// footer is plaintext (optionally signed).
-        /// </summary>
-        public string? FooterEncryptionKey { get; set; }
-
-        /// <summary>
-        /// Optional retrieval metadata for the footer encryption key, written to
-        /// <c>FileCryptoMetaData.key_metadata</c> in encrypted-footer mode.
-        /// </summary>
-        public byte[]? FooterEncryptionKeyMetadata { get; set; }
-
-        /// <summary>
-        /// Gets or sets the key used to sign the footer when using plaintext footer mode.
-        /// </summary>
-        public string? FooterSigningKey { get; set; } = null;
-
-        /// <summary>
-        /// Optional retrieval metadata for the footer signing key, written to
-        /// <c>FileMetaData.footer_signing_key_metadata</c> in plaintext-footer mode.
-        /// </summary>
-        public byte[]? FooterSigningKeyMetadata { get; set; }
-
-        /// <summary>
-        /// Optional Additional Authentication Data Prefix used to verify the integrity of the encrypted file. Only required
-        /// if the file was encrypted with an AAD Prefix *and* the prefix wasn't embedded into the
-        /// file by the author.
-        /// </summary>
-        /// <remarks>Currently only used by <see cref="ParquetReader"/></remarks>
-        public string? AADPrefix { get; set; } = null;
-
-        /// <summary>
-        /// Controls whether the writer embeds the AAD prefix in the file metadata
-        /// or requires readers to supply it out-of-band.
-        /// </summary>
-        /// <value>
-        /// <c>false</c> (default): store the AAD prefix in the file (if provided in <see cref="AADPrefix"/>).<br/>
-        /// <c>true</c>: do not store the prefix; readers must provide the same prefix to decrypt.
-        /// </value>
-        /// <remarks>
-        /// <para>
-        /// When <c>true</c>, <see cref="AADPrefix"/> must be set at write time. During read, the same prefix
-        /// must be provided in <see cref="AADPrefix"/>; otherwise decryption fails with an explicit error.
-        /// </para>
-        /// <para>
-        /// This maps to the Parquet encryption algorithm field <c>supply_aad_prefix</c>.
-        /// </para>
-        /// </remarks>
-        public bool SupplyAadPrefix { get; set; } = false;
-
-        /// <summary>
-        /// Use the AES-GCM-CTR variant for page bodies (per Parquet modular encryption spec).
-        /// </summary>
-        /// <value>
-        /// <c>false</c> (default): all modules use AES-GCM (V1).<br/>
-        /// <c>true</c>: page <b>bodies</b> use AES-CTR framing; page headers and all other modules remain AES-GCM.
-        /// </value>
-        /// <remarks>
-        /// <para>
-        /// Regardless of this setting, the file <b>footer</b> is always encrypted with AES-GCM.
-        /// </para>
-        /// <para>
-        /// Set this only if you need interoperability with writers/readers expecting the AES_GCM_CTR_V1 profile.
-        /// </para>
-        /// </remarks>
-        public bool UseCtrVariant { get; set; } = false;
-
-        /// <summary>
-        /// Specifies a column encryption key and optional key metadata for Parquet modular encryption.
-        /// </summary>
-        /// <param name="Key">The encryption key as a string.</param>
-        /// <param name="KeyMetadata">Optional key metadata as a byte array.</param>
-        public sealed record ColumnKeySpec(string Key, byte[]? KeyMetadata = null);
-
-        /// <summary>
-        /// Column keys to use when writing. Keyed by full path (e.g. "root.col" or just "col"
-        /// depending on how you form PathInSchema in your code).
-        /// If a column is present here, all of its modules (pages, page headers, indexes, bloom)
-        /// will be encrypted with this key, and its ColumnMetaData will be serialized
-        /// separately and encrypted into ColumnChunk.encrypted_column_metadata.
-        /// </summary>
-        public Dictionary<string, ColumnKeySpec> ColumnKeys { get; } =
-            new(StringComparer.Ordinal);
-
-        /// <summary>
-        /// Reader-side resolver that returns the AES key for a column given its path_in_schema
-        /// and key_metadata from ColumnCryptoMetaData.ENCRYPTION_WITH_COLUMN_KEY.
-        /// Return null to indicate key is unavailable (will throw when trying to read the column).
-        /// </summary>
-        public Func<IReadOnlyList<string>, byte[]?, string?>? ColumnKeyResolver { get; set; }
-
-        #endregion modular encryption
+        public int? BloomFilterBitsPerValueOverride { get; set; }
     }
+
+    /// <summary>
+    /// When true, decimals will be read and written as <see cref="BigDecimal"/> instead of <see cref="decimal"/>. This
+    /// is required if you are working with truly large decimals.
+    /// </summary>
+    public bool UseBigDecimal { get; set; } = false;
+
+    internal Type DecimalType => UseBigDecimal ? typeof(BigDecimal) : typeof(decimal);
+
+    /// <summary>
+    /// The Default Precision value used when not explicitly defined; this is the value used prior to parquet-dotnet
+    /// v3.9.
+    /// </summary>
+    public const int DefaultPrecision = 38;
+
+    /// <summary>
+    /// The Default Scale value used when not explicitly defined; this is the value used prior to parquet-dotnet v3.9.
+    /// </summary>
+    public const int DefaultScale = 18;
+
+    /// <summary>
+    /// If true, will attemp to use hardware accelerated math.
+    /// </summary>
+    public static bool UseHardwareAcceleration { get; set; } = true;
+
+    #region [ Serializer specific ]
+
+    /// <summary>
+    /// When set to true, appends to file by creating a new row group. Only applicable when using
+    /// <see cref="ParquetSerializer"/>. Be careul not to create a lot of tiny row groups as this affects reading
+    /// performance in all Parquet readers, not just this library.
+    /// </summary>
+    public bool Append { get; set; } = false;
+
+    /// <summary>
+    /// Default size of row groups if not specified
+    /// </summary>
+    public const int DefaultRowGroupSize = 1_000_000;
+
+    /// <summary>
+    /// Custom row group size, if different from <see cref="DefaultRowGroupSize"/> used by
+    /// <see cref="ParquetSerializer"/>.
+    /// </summary>
+    public int? RowGroupSize { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value that indicates whether a property's name uses a case-insensitive comparison during
+    /// deserialization. The default value is false. Full credits to
+    /// https://learn.microsoft.com/en-us/dotnet/api/system.text.json.jsonserializeroptions.propertynamecaseinsensitive?view=net-8.0#system-text-json-jsonserializeroptions-propertynamecaseinsensitive
+    /// </summary>
+    public bool PropertyNameCaseInsensitive { get; set; } = false;
+
+    /// <summary>
+    /// When using untyped serialisation, prefers using <see cref="System.String"/> when reading string values, instead
+    /// of <see cref="System.ReadOnlyMemory{Char}"/>.
+    /// </summary>
+    public static bool PreferUntypedString { get; set; } = true;
+
+    /// <summary>
+    /// When using untyped serialisation, prefers using <see cref="byte"/> array when reading byte array values, instead
+    /// of <see cref="System.ReadOnlyMemory{Byte}"/>.
+    /// </summary>
+    public static bool PreferUntypedByteArray { get; set; } = true;
+
+    #endregion
 }

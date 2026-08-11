@@ -1,57 +1,116 @@
-# 5.6.0-pre.3--kiloOhm.5
+# 6.1.1-pre.1
 
-## Fork changes
+## Breaking changes
+- The compression level changed from `SmallestSize` to `Optimal` for the default level like it was in v5. Thanks to @svenclaesson
+for pointing this out in #765.
 
-- feat: add a `net48` target to the forked `kiloOhm.Parquet.Net` package while keeping the existing `net8.0` and `net10.0` targets.
-- feat: add framework compatibility shims for async disposal, missing LINQ helpers, `DateOnly`/`TimeOnly`, and legacy compiler support needed to build on .NET Framework 4.8.
-- fix: add .NET Framework-safe fallbacks for Brotli compression, stream/span helpers, crypto operations, serializer helpers, and footer/page processing paths used by the query-layer integration.
-- fix: scope the fork-only `EnumerableCompatibility.Chunk(...)` helper to `net48` so it no longer collides with the built-in LINQ `Chunk(...)` API on modern targets.
+# 6.1.0
 
-# 5.6.0-pre.3--kiloOhm.4
+## New
 
-## Fork changes
+- **Big TIME** improvements (potentially breaking). Parquet.Net treats `TIME` logical type as `int` or `long` depending on precision and does not attempt to convert to .NET native temporal types which may lose precision. Class serializer also understands `TimeOnly`. Time uses new schema field `TimeDataField` which also allows specifying precision and UTC adjustment.
 
-- feat: added spec-aligned page index writing, including `column_orders`, footer-adjacent index modules, encrypted page indexes, and row-boundary-aware multi-page column chunks.
-- feat: added public row-group and page-level reader APIs for `OffsetIndex`, `ColumnIndex`, and selective page reads.
-- feat: added fallback scanning for files without persisted page indexes, including computed in-memory `ColumnIndex` support for query planning on supported types.
-- fix: `ParquetSerializer.DeserializeAsync(Stream, int, IList<T>, ParquetSerializerOptions, ...)` now correctly forwards serializer options such as `PropertyNameCaseInsensitive` when deserializing into an existing list.
-- test: added focused coverage for page index IO, multi-page writing, selective page reads, encrypted indexes, and old-file fallback behaviour.
+## Improvements
+- Exposed `WriteAllPartsAsync` internal method for callers who wish to manually supply definition levels and values (really low-level high-performance API). As wished by @spanglerco in #755.
+- `BigDecimal` encoding 7–17% speed improvement depending on precision and data size. By @rferraton in #740.
+- Marked INT96 `DateTimeKind` as `Unspecified` by @Kuinox in #695.
+- Documentation moved to a [dedicated space](https://www.aloneguid.uk/projects/parquet-dotnet/) to break from the GitHub markdown limitations.
 
-# 5.6.0-pre.3--kiloOhm.3
+## Bugs fixed
+- Legacy `TIME_MILLIS` converted type was not handled at all, now it's treated as `int`, and `TIME_MICROS` is handled as `long`, which is consistent with `TIME` logical type.
+- `TimeSpan` and `TimeOnly` in class serializer defaults to millisecond precision (used to be microseconds, but those types do not get enough precision to support this).
+- .NET `TimeStamp` type does not map to anything now. Parquet time type which used to be used for mapping does not actually map well as they represent totally different temporal meanings (time of day and interval of time). If you need to represent a time interval, use `Interval` Type.
+- Use absolute positioning on every page read, because in some edge cases page reader may not exhaust page data in #781 and #777 and 776 by @mukunku.
 
-## Fork changes
 
-- chore: updated repo and package info to not create confusion
+## Breaking changes
+- `UseTimeOnlyTypeForTimeMillis` and `UseTimeOnlyTypeForTimeMicros` removed from `ParquetOptions` due to better time handling logic so they are not used anymore.
 
-# 5.6.0-pre.3--kiloOhm.2
+todo:
+- should we even support TimeStamp? It can theoretically map to time, but actually no.
+- Class serializer should not attemp to use ROM<char> for strings.
 
-Fork release based on upstream changes merged after `5.6.0-pre.3--kiloOhm.1`.
+# 6.0.3
 
-## Fork changes
+## Improvements
+- `RawColumnData<T>` exposes `Values` and `NullableValues` properties and clear documentation (reported in #751 by @mukunku).
+- Add corresponding `ReadAsync` overload for `byte[]` (reported by @danielearwicker in #754).
 
-- chore: merged latest upstream `aloneguid/master` changes into the fork.
-- feat: pulled in upstream schema decoding improvements that prioritise logical type metadata when reading files.
-- fix: pulled in upstream Zstd page decompression handling for files with incorrect `UncompressedPageSize` metadata.
-- chore: kept fork modular encryption and split-block bloom filter support aligned while resolving the upstream merge.
-- chore: retained forked package naming and release/versioning flow based on `docs/release-notes.md`.
+## Bugs fixed
+- Column reader did not calculate the value count properly if one column chunk contained a dictionary page and more than one dictionary index page. Thanks @ben-hamida for reporting it in #749.
+- Class serializer could not handle `string[]` members (but could `List<string>`) due to not using correct conversion methods from `ReadOnlyMemory<char>` to `string`. Thanks to @jamesryanbell for investigation and reporting #741.
 
-# 5.6.0-pre.3--kiloOhm.1
+# 6.0.2
 
-Fork release based on upstream `5.6.0-pre.3`.
+- `ParquetRowGroupReader.ReadAsync` returns compacted values for nullable string columns (interleaved nulls lost) in #746. Thanks to @vchekfiscal.
 
-## Fork changes
+# 6.0.1
 
-- feat: added Parquet modular encryption support for reading and writing, including encrypted and plaintext footer modes, AES-GCM and AES-GCM-CTR variants, AAD prefix handling, footer signing/encryption keys, column-specific keys, and interoperability coverage with parquet-mr inspector fixtures.
-- feat: added split-block bloom filter support for writing, reading, and equality pruning, with end-to-end and spec-compliance test coverage.
-- chore: renamed published NuGet packages to `kiloOhm.Parquet.Net` and `kiloOhm.Parquet.Net.Data.Analysis` for forked distribution.
-- fix: updated BYTE_STREAM_SPLIT decoding to consume `ReadOnlySpan<byte>` and added the hashing dependency required by the new bloom filter implementation.
+Hot fix for #744 - string deserialisation helper always assumed nullable strings.
 
-# 5.6.0-pre.3
+## Other
+- Added future direction regardless LLM generated content. I'm getting really tired of this.
 
-- BREAKING CHANGE: To enable further evolution, like Spans, direct memory access, SIMD support and so on, I am dropping support for .NET Standard. The minimum supported version of .NET is .NET 8. Supporting anything lower would require a lot of effort which I can't give you.
-- feat: parquet decoder will prioritise logical type metadata when reading files, because some readers (like Arrow v22) do not write backward-compatible metadata anymore, in #719, #716 by @mukuntu, @aloneguid.
-- fix: Decode Zstd chunk with wrong length successfully, by @aloneguid in #717.
-- chore: greatly simplified versioning logic in CI/CD, now the only place to set version is in `docs/release-notes.md` file, which also supports pre-release version logic.
+# 6.0.0
+
+## Highlights
+
+- Complete rewrite of the low-level API.
+- .NET 8 is the minimum supported version.
+- Massive performance and memory usage improvements. **1.7 to 43.0** times faster than V5. Significantly less memory usage. Officially faster than native library wrappers.
+
+> V6 is a substantial rewrite of the low-level API, which addresses memory and performance issues. It's time to forget about the past and target modern .NET with modern APIs. The high-level API (class serializer) is not affected by these changes and should work as before logically, however you will see a massive performance increase and much lower memory usage. Parquet.Net development was pretty much stale for the last year or two, due to requirement for backward compatibility all the way to V1, and so I had to make a choice - whether stop adding any features and improvements, or break backward compatibility and make the library better. I chose the latter, and I hope you will like the new version as much as I do.
+
+For slightly more details, see [this post](https://www.aloneguid.uk/posts/2026/04/parquet6/).
+
+## Breaking changes
+
+- To enable further evolution of this library, like using Spans, direct memory access, SIMD support and so on, I am dropping support for .NET Standard and older .NET versions. The minimum supported version of .NET is .NET 8. Supporting anything lower (or Windows specific .NET, which only shares the name and not much more with THE .NET) would require a lot of effort which I can't give you.
+- `ParquetWriter` and `ParquetReader` only supports `IAsyncDisposable` now, so you should use `await using` instead of `using` when writing row groups. This is because some of the operations during writing are asynchronous and it would be a shame to not take advantage of that. Previously, `IDisposable` was supported as well, but that would occassionally cause write deadlocks.
+- `ParquetRowGroupWriter` now accepts `ReadOnlyMemory<T>` instead of untyped `DataColumn` (which is now removed). This solves old dangling issue with inflexible memory useage, as users of the low-level API had to unnecessarily allocate memory just to write a column, often resuling in making large redundant copies.
+- Same goes for `ParquetRowGroupReader`, which uses direct memory access interface instead of allocating a lot of memory via DataColumn and adding a lot of GC pressure.
+- `CompressionMethod` and `CompressionLevel` are moved to `ParquetOptions` for consistency reasons.
+- `ParquetOptions.UseDictionaryEncoding` and `ParquetOptions.UseDeltaBinaryPackedEncoding` is removed to avoid trying to dictionary-encode everything, which is not always the best choice. Instead, you can specify "encoding hints", which is more flexible and extensible, plus you can specify hint per encoding.
+- `ParquetSerializerOptions` is removed as it was often duplicating `ParquetOptions` and adding confusion. Instead, you can specify all options in `ParquetOptions`, which is used by both low-level and high-level APIs, so there is only one set of options to manage.
+- `FlatFileConverter` removed as it was subobtimal and half-done, and I don't want to maintain them in the long run.
+- As with the latest V5 minor release, I have high hopes for managed .NET compression libraries maintained by the community, so there will be absolutely zero native dependencies. They were created in C++ as a separate project in the times when .NET was young and didn't have good support for such things, but now there are some great high-performance libraries available. If I have time to spend on improving compression performance, I'd rather contribute to those projects.
+- `IParquetRowGroupReader` interface removed as it's not in use. Just use `ParquetRowGroupReader` directly.
+- `ParquetReader.ReadEntireRowGroup` removed in favor of strongly typed alternatives.
+- `IAsyncEnumerable` operations in `ParquetSerializer` are removed as they don't add anything in terms of performance - Parquet is not row-oriented format.
+- `ParquetSerializer` untyped serialization methods renamed to contain "Untyped" in their name, to make it more clear that they are not the same as class serializer methods and have very different use cases.
+- `ParquetSerializer` untyped deserialization is not experimental anymore, but it has changed signature to become stable.
+- `ParquetSerializer` deserialization methods return `DeserializationResult<T>` which, in addition to data like before, also contains original file schema and custom metadata. This allows you to close the loop when writing custom metadata and reading it back using the same API. There is zero overhead to include schema and custom metadata in the result anyway. This also allows extending the result in the future with more information if needed, without breaking changes.
+
+## Improvements
+
+- Dictionary encoding supports adaptive sampling, by @meni-braun in #712.
+- More APIs respect `CancellationToken` allowing you to cancel long-running parquet operations.
+- Add IsAdjustedToUTC property to TimeOnlyDataField, by @rferraton in #727.
+- `FileMerger` utililty is faster and more battle tested. Additionally, it allows specifying custom row group size.
+- Added support for BYTE_SPLIT_STREAM encoding on write (#725).
+
+## Bug fixes
+
+- Decoder will prioritise logical type metadata when reading files, because some readers (like Arrow v22) do not write backward-compatible metadata anymore, in #719, #716 by @mukuntu, @aloneguid.
+- Decode Zstd chunk with wrong length successfully, by @aloneguid in #717.
+
+## Performance
+
+- Serializer uses significantly less memory when serializing large collections.
+- Dictionary encoder will give up earlier if cardinality is too high, without iterating all values. Less memory is allocated on early exit.
+- Added initial support for hardware accelerated encoding/decoding (flag to turn it off is in `ParquetOptions`. Hardware acceleration will be added into more places as the library develops. At the moment:
+    - BYTE_STREAM_SPLIT decoding is about twice faster with hardware acceleration.
+    - PLAIN encoding for booleans is up to 12 times faster with hardware acceleration.
+- Zstandard compression is up to twice faster, uses twice less memory and is forward-compatible with .NET 11 built-in implementation ([more details](https://www.aloneguid.uk/posts/2026/04/zstd-dotnet/)).
+
+
+## Other changes
+
+- Greatly simplified versioning logic in CI/CD, now the only place to set version is in `docs/release-notes.md` file, which also supports pre-release version logic.
+- DuckDB integration tests removed, they turned out to be pretty much useless.
+- Some tests made much cleaner and more manageable by removing Theory and replacing it with Facts, when Theory validation had too many edge cases and actually made tests less maintainable.
+- `Parquet.Data.DataAnalysis` logic greatly simplified, T4 template removed.
+- Updated to the latest `parquet.thrift` to enable further feature implementations.
 
 # 5.5.0
 

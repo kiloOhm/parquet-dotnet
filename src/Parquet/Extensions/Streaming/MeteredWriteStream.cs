@@ -106,7 +106,8 @@ internal class MeteredWriteStream : Stream {
 
     protected override void Dispose(bool disposing) {
         base.Dispose(disposing);
-        if(disposing)                 _baseStream.Dispose();
+        if(disposing)
+            _baseStream.Dispose();
     }
 
 #if !NET48 && !NETSTANDARD2_0

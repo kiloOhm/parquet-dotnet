@@ -6,34 +6,27 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Parquet.Data;
 using Parquet.File.Values.Primitives;
-using Parquet.Schema;
 using Parquet.Serialization;
 using Parquet.Serialization.Attributes;
 using Parquet.Test.Xunit;
 using Xunit;
 
-namespace Parquet.Test.Serialisation; 
+namespace Parquet.Test.Serialisation;
 
 /// <summary>
-/// When writing tests for this class, please note that you must write the test
-/// for strong typed entities, and for untyped dictionaries. This is because
-/// assembler and shredder has slightly different code paths for untyped dictionaries,
-/// despite majority of the code being shared.
-/// Make the tests small and focused, and use the same test data for both. It helps to debug
-/// expression trees easier.
+/// When writing tests for this class, please note that you must write the test for strong typed entities, and for
+/// untyped dictionaries. This is because assembler and shredder has slightly different code paths for untyped
+/// dictionaries, despite majority of the code being shared. Make the tests small and focused, and use the same test
+/// data for both. It helps to debug expression trees easier.
 /// </summary>
 public class ParquetSerializerTest : TestBase {
 
-    private async Task Compare<T>(List<T> input, bool asJson = false, string? saveAsFile = null, bool useAsync = false)
+    private async Task CompareAsync<T>(List<T> input, bool asJson = false, string? saveAsFile = null)
         where T : class, new() {
 
         // serialize to parquet
         using var ms = new MemoryStream();
-        if(useAsync) {
-            await ParquetSerializer.SerializeAsync(input.ToAsyncEnumerable(), ms);
-        } else {
-            await ParquetSerializer.SerializeAsync(input, ms);
-        }
+        await ParquetSerializer.SerializeAsync(input, ms);
 
         if(saveAsFile != null) {
             await System.IO.File.WriteAllBytesAsync(saveAsFile, ms.ToArray());
@@ -41,7 +34,8 @@ public class ParquetSerializerTest : TestBase {
 
         // deserialize from parquet
         ms.Position = 0;
-        IList<T> deserialized = await ParquetSerializer.DeserializeAsync<T>(ms);
+        DeserializationResult<T> deserializationResult = await ParquetSerializer.DeserializeAsync<T>(ms);
+        IList<T> deserialized = deserializationResult.Data;
 
         // compare
         if(asJson) {
@@ -51,26 +45,26 @@ public class ParquetSerializerTest : TestBase {
         }
     }
 
-    private async Task DictCompare<TSchema>(List<Dictionary<string, object?>> input, bool asJson = false,
+    private async Task DictCompareAsync<TSchema>(List<Dictionary<string, object?>> input, bool asJson = false,
         string? writeTestFile = null) {
 
         // serialize to parquet
         using var ms = new MemoryStream();
-        await ParquetSerializer.SerializeAsync(typeof(TSchema).GetParquetSchema(true), input, ms);
+        await ParquetSerializer.SerializeUntypedAsync(input, typeof(TSchema).GetParquetSchema(true), ms);
 
         if(writeTestFile != null) {
-            System.IO.File.WriteAllBytes(writeTestFile, ms.ToArray());
+            await System.IO.File.WriteAllBytesAsync(writeTestFile, ms.ToArray());
         }
 
         // deserialize from parquet
         ms.Position = 0;
-        ParquetSerializer.UntypedResult deserialized = await ParquetSerializer.DeserializeAsync(ms);
+        DeserializationResult<Dictionary<string, object>> result = await ParquetSerializer.DeserializeUntypedAsync(ms);
 
         // compare
         if(asJson) {
-            XAssert.JsonEquivalent(input, deserialized.Data);
+            XAssert.JsonEquivalent(input, result.Data);
         } else {
-            Assert.Equivalent(input, deserialized.Data);
+            Assert.Equivalent(input, result.Data);
         }
     }
 
@@ -82,10 +76,8 @@ public class ParquetSerializerTest : TestBase {
         public Guid ExternalId { get; set; }
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Atomics_Simplest_Serde(bool useAsync) {
+    [Fact]
+    public async Task Atomics_Simplest_Serde() {
 
         var data = Enumerable.Range(0, 1_000).Select(i => new Record {
             Timestamp = DateTime.UtcNow.AddSeconds(i),
@@ -94,25 +86,35 @@ public class ParquetSerializerTest : TestBase {
             ExternalId = Guid.NewGuid()
         }).ToList();
 
-        await Compare(data, useAsync: useAsync);
-    }
-
-    class TimespanRecord {
-        public TimeSpan TimeSpan { get; set; }
-
-        public TimeSpan? NullableTimeSpan { get; set; }
+        await CompareAsync(data);
     }
 
     [Fact]
-    public async Task TimeSpan_Simplest_Serde() {
+    public async Task CustomMetadata_Serde() {
 
-        var data = Enumerable.Range(0, 1_000).Select(i => new TimespanRecord {
-            TimeSpan = TimeSpan.Parse("6:12:14:45"),
-            NullableTimeSpan = i % 2 == 0 ? TimeSpan.Parse("01:00:03") : null,
+        var data = Enumerable.Range(0, 1_000).Select(i => new Record {
+            Timestamp = DateTime.UtcNow.AddSeconds(i),
+            EventName = i % 2 == 0 ? "on" : "off",
+            MeterValue = i,
+            ExternalId = Guid.NewGuid()
         }).ToList();
 
-        await Compare(data);
+        using var ms = new MemoryStream();
+        await ParquetSerializer.SerializeAsync(data, ms, customMetadata: new Dictionary<string, string> {
+            { "source", "mssql" }
+        });
+
+        // check custom metadata written using raw api
+        ms.Position = 0;
+        await using ParquetReader reader = await ParquetReader.CreateAsync(ms);
+        Assert.Equal("mssql", reader.CustomMetadata["source"]);
+
+        // check custom metadata written using high-level api
+        ms.Position = 0;
+        DeserializationResult<Record> result = await ParquetSerializer.DeserializeAsync<Record>(ms);
+        Assert.Equal("mssql", result.CustomMetadata["source"]);
     }
+
 
     [Fact]
     public async Task Atomics_Simplest_Serde_Dict() {
@@ -124,7 +126,33 @@ public class ParquetSerializerTest : TestBase {
             ["ExternalId"] = Guid.NewGuid()
         }).ToList();
 
-        await DictCompare<Record>(data);
+        await DictCompareAsync<Record>(data);
+    }
+
+    [Fact]
+    public async Task CustomMetadata_Dict() {
+
+        var data = Enumerable.Range(0, 1_000).Select(i => new Dictionary<string, object?> {
+            ["Timestamp"] = DateTime.UtcNow.AddSeconds(i),
+            ["EventName"] = i % 2 == 0 ? "on" : "off",
+            ["MeterValue"] = (double)i,
+            ["ExternalId"] = Guid.NewGuid()
+        }).ToList();
+
+        using var ms = new MemoryStream();
+        await ParquetSerializer.SerializeUntypedAsync(data, typeof(Record).GetParquetSchema(true), ms, customMetadata: new Dictionary<string, string> {
+            { "source", "mssql" }
+        });
+
+        // check custom metadata written
+        ms.Position = 0;
+        await using ParquetReader reader = await ParquetReader.CreateAsync(ms);
+        Assert.Equal("mssql", reader.CustomMetadata["source"]);
+
+        // check custom metadata written using high-level api
+        ms.Position = 0;
+        DeserializationResult<Record> result = await ParquetSerializer.DeserializeAsync<Record>(ms);
+        Assert.Equal("mssql", result.CustomMetadata["source"]);
     }
 
     class RecordWithFields {
@@ -141,7 +169,7 @@ public class ParquetSerializerTest : TestBase {
             IdField = i
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     class RecordWithNewField : Record {
@@ -169,14 +197,13 @@ public class ParquetSerializerTest : TestBase {
         await ParquetSerializer.SerializeAsync(data, ms);
 
         ms.Position = 0;
-        IList<RecordWithNewField> data2 = await ParquetSerializer.DeserializeAsync<RecordWithNewField>(
-            ms);
+        IList<RecordWithNewField> data2 = (await ParquetSerializer.DeserializeAsync<RecordWithNewField>(ms)).Data;
 
         Assert.Equal(data.Count, data2.Count);
         Assert.Equal(default, data2.First().NewTimestamp);
         Assert.Null(data2.First().NewEventName);
         Assert.Equal(123, data2.First().NewMeterValue);
-        Assert.Equal(default, data2.First().NewExternalId);
+        Assert.Equal(Guid.Empty, data2.First().NewExternalId);
     }
 
     class NullableRecord : Record {
@@ -199,7 +226,7 @@ public class ParquetSerializerTest : TestBase {
             ParentResolution = (i % 6 == 0) ? null : (decimal?)i
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -219,7 +246,7 @@ public class ParquetSerializerTest : TestBase {
                           .ToDictionary(kvp => kvp.Key, kvp => kvp.Value))
             .ToList();
 
-        await DictCompare<NullableRecord>(dataNoNullKeys);
+        await DictCompareAsync<NullableRecord>(dataNoNullKeys);
     }
 
     class Primitives {
@@ -257,9 +284,6 @@ public class ParquetSerializerTest : TestBase {
         public List<DateTime>? DateTimes { get; set; }
 
         [ParquetSimpleRepeatable]
-        public List<TimeSpan>? TimeSpans { get; set; }
-
-        [ParquetSimpleRepeatable]
         public List<Interval>? Intervals { get; set; }
 
         [ParquetSimpleRepeatable]
@@ -268,8 +292,8 @@ public class ParquetSerializerTest : TestBase {
 
     [Fact]
     public async Task TestData_LegacyPrimitivesCollectionArrays() {
-        IList<Primitives> data = await ParquetSerializer.DeserializeAsync<Primitives>(
-            OpenTestFile("legacy_primitives_collection_arrays.parquet"));
+        IList<Primitives> data = (await ParquetSerializer.DeserializeAsync<Primitives>(
+            OpenTestFile("legacy_primitives_collection_arrays.parquet"))).Data;
 
         Assert.NotNull(data);
         Assert.Single(data);
@@ -286,7 +310,6 @@ public class ParquetSerializerTest : TestBase {
         Assert.Equivalent(element.Doubles, new double[] { 1.2, 1.3 });
         Assert.Equivalent(element.Decimals, new decimal[] { 1.2m, 1.3m });
         Assert.Equivalent(element.DateTimes, new DateTime[] { new DateTime(2023, 01, 01), new DateTime(2023, 02, 01, 16, 30, 05) });
-        Assert.Equivalent(element.TimeSpans, new TimeSpan[] { TimeSpan.Zero, TimeSpan.FromSeconds(5) });
         Assert.Equivalent(element.Intervals, new[] { new Interval(0, 0, 0), new Interval(0, 1, 1) });
         Assert.Equivalent(element.Strings, new[] { "Hello", "People" });
     }
@@ -294,18 +317,18 @@ public class ParquetSerializerTest : TestBase {
 
     [Fact]
     public async Task TestData_LegacyPrimitivesCollectionArrays_Dict() {
-        ParquetSerializer.UntypedResult r = await ParquetSerializer.DeserializeAsync(
+        DeserializationResult<Dictionary<string, object>> result = await ParquetSerializer.DeserializeUntypedAsync(
             OpenTestFile("legacy_primitives_collection_arrays.parquet"));
 
-        Assert.NotNull(r);
+        Assert.NotNull(result.Data);
     }
 
     [Fact]
     public async Task TestData_DeltaCheckpoint_Untyped() {
-        ParquetSerializer.UntypedResult r = await ParquetSerializer.DeserializeAsync(
+        DeserializationResult<Dictionary<string, object>> result = await ParquetSerializer.DeserializeUntypedAsync(
             OpenTestFile("delta.checkpoint.parquet"));
 
-        Assert.NotNull(r);
+        Assert.NotNull(result.Data);
     }
 
     class DeltaCheckpointAdd {
@@ -326,8 +349,8 @@ public class ParquetSerializerTest : TestBase {
 
     [Fact]
     public async Task TestData_DeltaCheckpoint() {
-        IList<DeltaCheckpoint> r = await ParquetSerializer.DeserializeAsync<DeltaCheckpoint>(
-            OpenTestFile("delta.checkpoint.parquet"));
+        IList<DeltaCheckpoint> r = (await ParquetSerializer.DeserializeAsync<DeltaCheckpoint>(
+            OpenTestFile("delta.checkpoint.parquet"))).Data;
 
         Assert.NotNull(r);
 
@@ -369,7 +392,7 @@ public class ParquetSerializerTest : TestBase {
             }
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -384,7 +407,7 @@ public class ParquetSerializerTest : TestBase {
             }
         }).ToList();
 
-        await DictCompare<AddressBookEntry>(data, true);
+        await DictCompareAsync<AddressBookEntry>(data, true);
     }
 
 
@@ -411,7 +434,7 @@ public class ParquetSerializerTest : TestBase {
         // Address.Country/City must be RL: 0, DL: 0 as Address is null
 
         ms.Position = 0;
-        IList<AddressBookEntry> data2 = await ParquetSerializer.DeserializeAsync<AddressBookEntry>(ms);
+        IList<AddressBookEntry> data2 = (await ParquetSerializer.DeserializeAsync<AddressBookEntry>(ms)).Data;
 
         XAssert.JsonEquivalent(data, data2);
     }
@@ -430,7 +453,7 @@ public class ParquetSerializerTest : TestBase {
             }
         };
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -444,7 +467,7 @@ public class ParquetSerializerTest : TestBase {
             }).ToList()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -458,7 +481,7 @@ public class ParquetSerializerTest : TestBase {
             }).ToList()
         }).ToList();
 
-        await DictCompare<MovementHistory>(data);
+        await DictCompareAsync<MovementHistory>(data);
     }
 
     class ListOfMapsPoco {
@@ -477,7 +500,7 @@ public class ParquetSerializerTest : TestBase {
             }).ToList()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     class ListOfListsOfAtomicsPoco {
@@ -493,7 +516,7 @@ public class ParquetSerializerTest : TestBase {
             Lists = Enumerable.Range(0, 2).Select(m => new List<int> { 1, 2, 3 }).ToList()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     class ListOfDictionariesOfStructsItemPoco {
@@ -517,7 +540,7 @@ public class ParquetSerializerTest : TestBase {
             }).ToList()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
 
@@ -529,7 +552,7 @@ public class ParquetSerializerTest : TestBase {
             Addresses = null
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -540,7 +563,7 @@ public class ParquetSerializerTest : TestBase {
             Addresses = new()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     class MovementHistoryCompressed {
@@ -570,7 +593,7 @@ public class ParquetSerializerTest : TestBase {
             ParentIds = Enumerable.Range(i, 4).ToList()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -581,7 +604,7 @@ public class ParquetSerializerTest : TestBase {
             ParentIds = Enumerable.Range(i, 4).Select(i => (int?)i).ToList()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
@@ -592,29 +615,29 @@ public class ParquetSerializerTest : TestBase {
             ParentIds = Enumerable.Range(i, 4).ToArray()
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     [Fact]
     public async Task List_Atomics_Serde_Dict() {
 
         var data = Enumerable.Range(0, 100).Select(i => new Dictionary<string, object?> {
-            ["PersonId"] = i,
+            ["PersonId"] = new int?(i),
             ["ParentIds"] = Enumerable.Range(i, 4).ToList()
         }).ToList();
 
-        await DictCompare<MovementHistoryCompressed>(data);
+        await DictCompareAsync<MovementHistoryCompressed>(data);
     }
 
     [Fact]
     public async Task List_NullableAtomics_Serde_Dict() {
 
         var data = Enumerable.Range(0, 100).Select(i => new Dictionary<string, object?> {
-            ["PersonId"] = i,
+            ["PersonId"] = new int?(i),
             ["ParentIds"] = Enumerable.Range(i, 4).Select(i => (int?)i).ToList()
         }).ToList();
 
-        await DictCompare<MovementHistoryNullableCompressed>(data);
+        await DictCompareAsync<MovementHistoryNullableCompressed>(data);
     }
 
     [Fact]
@@ -625,7 +648,7 @@ public class ParquetSerializerTest : TestBase {
             ["ParentIds"] = Enumerable.Range(i, 4).ToList()
         }).ToList();
 
-        await DictCompare<MovementHistoryCompressedWithArrays>(data);
+        await DictCompareAsync<MovementHistoryCompressedWithArrays>(data);
     }
 
     [Fact]
@@ -653,16 +676,18 @@ public class ParquetSerializerTest : TestBase {
 
         // low-level validate that the file has correct levels
         ms.Position = 0;
-        List<Data.DataColumn> cols = await ReadColumns(ms);
-        DataColumn pidsCol = cols[1];
-        Assert.Equal(new int[] { 1, 2, 3, 4, 5 }, pidsCol.DefinedData);
-        Assert.Equal(new int[] { 2, 2, 1, 2, 2, 2 }, pidsCol.DefinitionLevels);
-        Assert.Equal(new int[] { 0, 1, 0, 0, 1, 1 }, pidsCol.RepetitionLevels);
-
+        await using(ParquetReader reader = await ParquetReader.CreateAsync(ms)) {
+            using ParquetRowGroupReader rgr = reader.OpenRowGroupReader(0);
+            using(RawColumnData<int> col = await rgr.ReadRawColumnDataAsync<int>(reader.Schema.DataFields[1])) {
+                Assert.Equivalent(new int[] { 1, 2, 3, 4, 5 }, col.NullableValues.ToArray());
+                Assert.Equivalent(new int[] { 2, 2, 1, 2, 2, 2 }, col.DefinitionLevels.ToArray());
+                Assert.Equivalent(new int[] { 0, 1, 0, 0, 1, 1 }, col.RepetitionLevels.ToArray());
+            }
+        }
 
         // deserialise
         ms.Position = 0;
-        IList<MovementHistoryCompressed> data2 = await ParquetSerializer.DeserializeAsync<MovementHistoryCompressed>(ms);
+        IList<MovementHistoryCompressed> data2 = (await ParquetSerializer.DeserializeAsync<MovementHistoryCompressed>(ms)).Data;
 
         // assert
         XAssert.JsonEquivalent(data, data2);
@@ -692,18 +717,43 @@ public class ParquetSerializerTest : TestBase {
 
         // low-level validate that the file has correct levels
         ms.Position = 0;
-        List<Data.DataColumn> cols = await ReadColumns(ms);
-        DataColumn pidsCol = cols[1];
-        Assert.Equal(new int[] { 1, 2, 3, 4 }, pidsCol.DefinedData);
-        Assert.Equal(new int[] { 2, 2, 0, 2, 2 }, pidsCol.DefinitionLevels);
-        Assert.Equal(new int[] { 0, 1, 0, 0, 1 }, pidsCol.RepetitionLevels);
+        await using(ParquetReader reader = await ParquetReader.CreateAsync(ms)) {
+            using ParquetRowGroupReader rgr = reader.OpenRowGroupReader(0);
+            using(RawColumnData<int> col = await rgr.ReadRawColumnDataAsync<int>(reader.Schema.DataFields[1])) {
+                Assert.Equivalent(new int[] { 1, 2, 3, 4 }, col.NullableValues.ToArray());
+                Assert.Equivalent(new int[] { 2, 2, 0, 2, 2 }, col.DefinitionLevels.ToArray());
+                Assert.Equivalent(new int[] { 0, 1, 0, 0, 1 }, col.RepetitionLevels.ToArray());
+            }
+        }
 
         // deserialise
         ms.Position = 0;
-        IList<MovementHistoryCompressed> data2 = await ParquetSerializer.DeserializeAsync<MovementHistoryCompressed>(ms);
+        IList<MovementHistoryCompressed> data2 = (await ParquetSerializer.DeserializeAsync<MovementHistoryCompressed>(ms)).Data;
 
         // assert
         XAssert.JsonEquivalent(data, data2);
+    }
+
+    class IdWithKeywords {
+        public int Id { get; set; }
+
+        public string[] Keywords { get; set; } = Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// System.String is treated slightly different by the deserializer, because it needs to convert from
+    /// <see cref="ReadOnlyMemory{char}"/>
+    /// </summary>
+    /// <returns></returns>
+    [Fact]
+    public async Task List_SystemString_Serde() {
+        var data = new List<IdWithKeywords> {
+            new IdWithKeywords { Id = 1, Keywords = new[] { "one", "two" } },
+            new IdWithKeywords { Id = 2, Keywords = new[] { "one" }},
+            new IdWithKeywords { Id = 2, Keywords = Array.Empty<string>()}
+        };
+
+        await CompareAsync(data);
     }
 
 
@@ -724,20 +774,20 @@ public class ParquetSerializerTest : TestBase {
             }
         }).ToList();
 
-        await Compare(data, true);
+        await CompareAsync(data, true);
     }
 
     [Fact]
     public async Task Map_Simple_Serde_Dict() {
         var data = Enumerable.Range(0, 10).Select(i => new Dictionary<string, object?> {
             ["Id"] = i,
-            ["Tags"] = new Dictionary<string, string> {
-                ["id"] = i.ToString(),
-                ["gen"] = DateTime.UtcNow.ToString()
+            ["Tags"] = new Dictionary<ReadOnlyMemory<char>, ReadOnlyMemory<char>?> {
+                ["id".AsReadOnlyMemory()] = i.ToString().AsNullableReadOnlyMemory(),
+                ["gen".AsReadOnlyMemory()] = DateTime.UtcNow.ToString().AsNullableReadOnlyMemory()
             }
         }).ToList();
 
-        await DictCompare<IdWithTags>(data, true);
+        await DictCompareAsync<IdWithTags>(data, true);
     }
 
     class ContainerForIdWithTags {
@@ -759,7 +809,7 @@ public class ParquetSerializerTest : TestBase {
             }
         }).ToList();
 
-        await Compare(data, true);
+        await CompareAsync(data, true);
     }
 
     class IdWithNames {
@@ -772,12 +822,12 @@ public class ParquetSerializerTest : TestBase {
         var data = new List<Dictionary<string, object?>> {
     new Dictionary<string, object?> {
         ["Id"] = 1,
-        ["Names"] = new Dictionary<int, string> {
-            [1] = "Name1",
-            [2] = "name2"
+        ["Names"] = new Dictionary<int, ReadOnlyMemory<char>?> {
+            [1] = "Name1".AsNullableReadOnlyMemory(),
+            [2] = "name2".AsNullableReadOnlyMemory()
         }}};
 
-        await DictCompare<IdWithNames>(data, true);
+        await DictCompareAsync<IdWithNames>(data, true);
     }
 
     [Fact]
@@ -795,11 +845,11 @@ public class ParquetSerializerTest : TestBase {
             List<Record> dataBatch = data.Skip(i).Take(batchSize).ToList();
 
             ms.Position = 0;
-            await ParquetSerializer.SerializeAsync(dataBatch, ms, new ParquetSerializerOptions { Append = i > 0 });
+            await ParquetSerializer.SerializeAsync(dataBatch, ms, new ParquetOptions { Append = i > 0 });
         }
 
         ms.Position = 0;
-        IList<Record> data2 = await ParquetSerializer.DeserializeAsync<Record>(ms);
+        IList<Record> data2 = (await ParquetSerializer.DeserializeAsync<Record>(ms)).Data;
 
         Assert.Equivalent(data2, data);
     }
@@ -813,7 +863,7 @@ public class ParquetSerializerTest : TestBase {
         }).ToList();
 
         using var ms = new MemoryStream();
-        await Assert.ThrowsAsync<IOException>(async () => await ParquetSerializer.SerializeAsync(data, ms, new ParquetSerializerOptions { Append = true }));
+        await Assert.ThrowsAsync<IOException>(async () => await ParquetSerializer.SerializeAsync(data, ms, new ParquetOptions { Append = true }));
     }
 
     [Fact]
@@ -831,7 +881,7 @@ public class ParquetSerializerTest : TestBase {
                     }
                 },
                 tempPath,
-                new ParquetSerializerOptions { Append = false });
+                new ParquetOptions { Append = false });
 
             await ParquetSerializer.SerializeAsync(
                 new[] {
@@ -842,9 +892,9 @@ public class ParquetSerializerTest : TestBase {
                     }
                 },
                 tempPath,
-                new ParquetSerializerOptions { Append = true });
+                new ParquetOptions { Append = true });
 
-            using ParquetReader reader = await ParquetReader.CreateAsync(tempPath);
+            await using ParquetReader reader = await ParquetReader.CreateAsync(tempPath);
 
             using(ParquetRowGroupReader reader0 = reader.OpenRowGroupReader(0)) {
                 Assert.Equal(1, reader0.RowCount);
@@ -858,10 +908,8 @@ public class ParquetSerializerTest : TestBase {
         }
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Specify_row_group_size(bool useAsync) {
+    [Fact]
+    public async Task Specify_row_group_size() {
         var data = Enumerable.Range(0, 100).Select(i => new Record {
             Timestamp = DateTime.UtcNow.AddSeconds(i),
             EventName = i % 2 == 0 ? "on" : "off",
@@ -869,16 +917,12 @@ public class ParquetSerializerTest : TestBase {
         }).ToList();
 
         using var ms = new MemoryStream();
-        var options = new ParquetSerializerOptions { RowGroupSize = 20 };
-        if(useAsync) {
-            await ParquetSerializer.SerializeAsync(data.ToAsyncEnumerable(), ms, options);
-        } else {
-            await ParquetSerializer.SerializeAsync(data, ms, options);
-        }
+        var options = new ParquetOptions { RowGroupSize = 20 };
+        await ParquetSerializer.SerializeAsync(data, ms, options);
 
         // validate we have 5 row groups in the resulting file
         ms.Position = 0;
-        using ParquetReader reader = await ParquetReader.CreateAsync(ms);
+        await using ParquetReader reader = await ParquetReader.CreateAsync(ms);
         Assert.Equal(5, reader.RowGroupCount);
     }
 
@@ -895,42 +939,15 @@ public class ParquetSerializerTest : TestBase {
         }).ToList();
 
         using var ms = new MemoryStream();
-        await ParquetSerializer.SerializeAsync(data, ms, new ParquetSerializerOptions { RowGroupSize = rowGroupSize });
+        await ParquetSerializer.SerializeAsync(data, ms, new ParquetOptions { RowGroupSize = rowGroupSize });
 
         ms.Position = 0;
         for(int i = 0; i < records; i += rowGroupSize) {
-            IList<Record> data2 = await ParquetSerializer.DeserializeAsync<Record>(ms, i / rowGroupSize);
+            IList<Record> data2 = (await ParquetSerializer.DeserializeAsync<Record>(ms, rowGroupIndex: i / rowGroupSize)).Data;
             Assert.Equivalent(data.Skip(i).Take(rowGroupSize), data2);
         }
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Deserialize_as_async_enumerable(bool useAsync) {
-        DateTime now = DateTime.UtcNow;
-        int records = 100;
-        int rowGroupSize = 20;
-
-        var data = Enumerable.Range(0, records).Select(i => new Record {
-            Timestamp = now.AddSeconds(i),
-            EventName = i % 2 == 0 ? "on" : "off",
-            MeterValue = i
-        }).ToList();
-
-        using var ms = new MemoryStream();
-        var options = new ParquetSerializerOptions { RowGroupSize = rowGroupSize };
-        if(useAsync) {
-            await ParquetSerializer.SerializeAsync(data.ToAsyncEnumerable(), ms, options);
-        } else {
-            await ParquetSerializer.SerializeAsync(data, ms, options);
-        }
-
-        ms.Position = 0;
-        Record[] data2 = await ParquetSerializer.DeserializeAllAsync<Record>(ms).ToArrayAsync();
-
-        Assert.Equivalent(data, data2);
-    }
 
     [Fact]
     public async Task Specify_row_group_size_too_small() {
@@ -942,7 +959,7 @@ public class ParquetSerializerTest : TestBase {
 
         using var ms = new MemoryStream();
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => ParquetSerializer.SerializeAsync(data, ms, new ParquetSerializerOptions { RowGroupSize = 0 }));
+            () => ParquetSerializer.SerializeAsync(data, ms, new ParquetOptions { RowGroupSize = 0 }));
     }
 
     class StringRequiredAndNot {
@@ -960,7 +977,7 @@ public class ParquetSerializerTest : TestBase {
         };
 
         await using Stream stream = OpenTestFile("required-strings.parquet");
-        IList<StringRequiredAndNot> actual = await ParquetSerializer.DeserializeAsync<StringRequiredAndNot>(stream);
+        IList<StringRequiredAndNot> actual = (await ParquetSerializer.DeserializeAsync<StringRequiredAndNot>(stream)).Data;
 
         Assert.Equivalent(expected, actual);
     }
@@ -991,7 +1008,7 @@ public class ParquetSerializerTest : TestBase {
             }
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     enum DefaultEnum {
@@ -1024,7 +1041,7 @@ public class ParquetSerializerTest : TestBase {
             NE = i % 2 == 0 ? null : DefaultEnum.One,
         }).ToList();
 
-        await Compare(data);
+        await CompareAsync(data);
     }
 
     interface IInterface {
@@ -1058,7 +1075,7 @@ public class ParquetSerializerTest : TestBase {
         await ParquetSerializer.SerializeAsync(data, ms);
 
         ms.Position = 0;
-        IList<InterfaceImpl> data2 = await ParquetSerializer.DeserializeAllAsync<InterfaceImpl>(ms).ToArrayAsync();
+        IList<InterfaceImpl> data2 = (await ParquetSerializer.DeserializeAsync<InterfaceImpl>(ms)).Data;
 
         Assert.Equivalent(data, data2);
 
@@ -1075,7 +1092,7 @@ public class ParquetSerializerTest : TestBase {
         await ParquetSerializer.SerializeAsync(data, ms);
 
         ms.Position = 0;
-        IList<ConcreteRootInterfaceImpl> data2 = await ParquetSerializer.DeserializeAllAsync<ConcreteRootInterfaceImpl>(ms).ToArrayAsync();
+        IList<ConcreteRootInterfaceImpl> data2 = (await ParquetSerializer.DeserializeAsync<ConcreteRootInterfaceImpl>(ms)).Data;
 
         Assert.Equivalent(data, data2);
     }
@@ -1120,13 +1137,13 @@ public class ParquetSerializerTest : TestBase {
             lowerCase = i % 2 == 0 ? "on" : "off"
         }).ToList();
 
-        // serialise to memory stream
+        // serialize to memory stream
         using var ms = new MemoryStream();
         await ParquetSerializer.SerializeAsync(data, ms);
         ms.Position = 0;
 
         // deserialize from memory stream, but use the new class
-        IList<AfterRename> data2 = await ParquetSerializer.DeserializeAsync<AfterRename>(ms);
+        IList<AfterRename> data2 = (await ParquetSerializer.DeserializeAsync<AfterRename>(ms)).Data;
 
         // because property names are case sensitive, we should have nulls in the new class
         Assert.True(data2.All(d => d.LowerCase == null));
@@ -1144,34 +1161,14 @@ public class ParquetSerializerTest : TestBase {
         ms.Position = 0;
 
         // deserialize from memory stream, but use the new class
-        IList<AfterRename> data2 = await ParquetSerializer.DeserializeAsync<AfterRename>(ms,
-            new ParquetSerializerOptions { PropertyNameCaseInsensitive = true });
+        IList<AfterRename> data2 = (await ParquetSerializer.DeserializeAsync<AfterRename>(ms,
+            new ParquetOptions { PropertyNameCaseInsensitive = true })).Data;
 
         // because property names are case sensitive, we should have nulls in the new class
         Assert.True(data2.All(d => d.LowerCase == "on" || d.LowerCase == "off"));
     }
 
-    [Fact]
-    public async Task RenameProperty_CaseInsensitive_RowGroupDeserializeIntoExistingList() {
-        var data = Enumerable.Range(0, 1_000).Select(i => new BeforeRename {
-            lowerCase = i % 2 == 0 ? "on" : "off"
-        }).ToList();
-
-        using var ms = new MemoryStream();
-        await ParquetSerializer.SerializeAsync(data, ms);
-        ms.Position = 0;
-
-        var result = new List<AfterRename>();
-        await ParquetSerializer.DeserializeAsync(ms, 0, result,
-            new ParquetSerializerOptions { PropertyNameCaseInsensitive = true });
-
-        Assert.Equal(data.Count, result.Count);
-        Assert.True(result.All(d => d.LowerCase == "on" || d.LowerCase == "off"));
-    }
-
-#if NET6_0_OR_GREATER
-
-    record RecordContainingDateAndtimeOnly {
+    record RecordContainingDateAndTimeOnly {
         public DateOnly? NullableDate { get; set; }
         public TimeOnly? NullableTime { get; set; }
         public DateOnly Date { get; set; }
@@ -1181,7 +1178,7 @@ public class ParquetSerializerTest : TestBase {
     [Fact]
     public async Task DateOnlyTimeOnly_Nullable_Serde() {
 
-        var data = Enumerable.Range(0, 1_000).Select(i => new RecordContainingDateAndtimeOnly {
+        var data = Enumerable.Range(0, 1_000).Select(i => new RecordContainingDateAndTimeOnly {
             NullableDate = i == 0 ? null : DateOnly.MinValue.AddDays(i),
             NullableTime = i == 0 ? null : TimeOnly.MinValue.AddMinutes(i),
             Date = DateOnly.MinValue.AddDays(i + 1),
@@ -1192,12 +1189,15 @@ public class ParquetSerializerTest : TestBase {
         await ParquetSerializer.SerializeAsync(data, ms);
 
         ms.Position = 0;
-        IList<RecordContainingDateAndtimeOnly> data2 = await ParquetSerializer.DeserializeAsync<RecordContainingDateAndtimeOnly>(ms);
+        IList<RecordContainingDateAndTimeOnly> data2 = (await ParquetSerializer.DeserializeAsync<RecordContainingDateAndTimeOnly>(ms)).Data;
 
         Assert.Equivalent(data2, data);
     }
-
-#endif
+    
+    // todo: check that TimeOnly restrictions fire.
+    
+    // todo: same but for dictionary-based
+    
 
     private struct StructWithIntProp {
         public int Id { get; set; }
@@ -1220,7 +1220,7 @@ public class ParquetSerializerTest : TestBase {
         await ParquetSerializer.SerializeAsync(data, ms);
 
         ms.Position = 0;
-        IList<ClassWithNullableCustomStruct> data2 = await ParquetSerializer.DeserializeAsync<ClassWithNullableCustomStruct>(ms);
+        IList<ClassWithNullableCustomStruct> data2 = (await ParquetSerializer.DeserializeAsync<ClassWithNullableCustomStruct>(ms)).Data;
 
         Assert.Equivalent(data2, data);
     }
@@ -1243,8 +1243,7 @@ public class ParquetSerializerTest : TestBase {
     /// <returns></returns>
     [Fact]
     public async Task EdgeCase_RawInt64_to_Int32() {
-
-        using Stream testFile = OpenTestFile("special/no-logical-type.parquet");
+        await using Stream testFile = OpenTestFile("special/no-logical-type.parquet");
 
         await Assert.ThrowsAsync<InvalidCastException>(async () => {
             await ParquetSerializer.DeserializeAsync<EdgeCaseInt32Optional>(testFile);
@@ -1254,8 +1253,8 @@ public class ParquetSerializerTest : TestBase {
     [Fact]
     public async Task EdgeCase_Int64() {
 
-        IList<EdgeCaseInt64Optional> r = await ParquetSerializer.DeserializeAsync<EdgeCaseInt64Optional>(
-           OpenTestFile("special/no-logical-type.parquet"));
+        IList<EdgeCaseInt64Optional> r = (await ParquetSerializer.DeserializeAsync<EdgeCaseInt64Optional>(
+           OpenTestFile("special/no-logical-type.parquet"))).Data;
 
         Assert.NotNull(r);
         Assert.Equal(3, r.Count);
@@ -1264,56 +1263,43 @@ public class ParquetSerializerTest : TestBase {
         Assert.Equal(3, r[2].Id);
     }
 
+    [Fact]
+    public async Task ListOfStructs_Dict() {
+        using Stream s = OpenTestFile("list_structs.parquet");
+        DeserializationResult<Dictionary<string, object>> result = await ParquetSerializer.DeserializeUntypedAsync(s, new ParquetOptions {
+            TreatByteArrayAsString = true,
+            UseBigDecimal = true
+        });
+    }
+
     class ClassWithPreinitializedDict {
         public Dictionary<DateTime, double> DateTimeDoubleDict { get; set; } = new();
     }
 
-    [Fact]
-    public async Task E2EPreInitializedDict() {
-        using var ms = new MemoryStream();
-
-        var testData = new ClassWithPreinitializedDict {
-            DateTimeDoubleDict = new Dictionary<DateTime, double> {
-                { new DateTime(2021, 1, 1), 1.1 },
-                { new DateTime(2021, 1, 2), 2.2 },
-                { new DateTime(2021, 1, 3), 3.3 }
-            }
-        };
-
-        using(ParquetWriter writer = await ParquetWriter.CreateAsync(typeof(ClassWithPreinitializedDict).GetParquetSchema(true), ms)) {
-            await ParquetSerializer.SerializeRowGroupAsync(writer, new[] { testData }, default);
-        }
-        ms.Position = 0;
-
-        using ParquetReader reader = await ParquetReader.CreateAsync(ms);
-        ParquetSchema schema = reader.Schema;
-        using ParquetRowGroupReader rg = reader.OpenRowGroupReader(0);
-        var buffer = new List<ClassWithPreinitializedDict>();
-        await ParquetSerializer.DeserializeRowGroupAsync(rg, schema, buffer);
-
-        Assert.Equal(testData.DateTimeDoubleDict.Count, buffer[0]?.DateTimeDoubleDict?.Count);
-        Assert.Equal(testData.DateTimeDoubleDict[new DateTime(2021, 1, 1)], buffer[0]?.DateTimeDoubleDict?[new DateTime(2021, 1, 1)]);
+    public record Record1 {
+        public int Id { get; set; }
     }
 
     [Fact]
     public async Task EmptyFileHandling() {
         // create an empty parquet file (i.e. with no row groups)
         var ms = new MemoryStream();
-        await ParquetSerializer.SerializeAsync<Record>(new List<Record>(), ms);
+        await ParquetSerializer.SerializeAsync<Record1>(new List<Record1>(), ms);
 
         // make sure we can read from it without error, and get an empty list back
         ms.Position = 0;
-        IList<Record> data = await ParquetSerializer.DeserializeAsync<Record>(ms);
+        IList<Record1> data = (await ParquetSerializer.DeserializeAsync<Record1>(ms)).Data;
         Assert.Empty(data);
-
-        // try with DeserializeAllAsync too
-        ms.Position = 0;
-        int count = 0;
-        await foreach(Record record in ParquetSerializer.DeserializeAllAsync<Record>(ms)) {
-            // just iterate through all records
-            count += 1;
-        }
-        Assert.Equal(count, data.Count);
     }
 
+    public record EmptyDuckDbFile_Model {
+        public int Id { get; set; }
+        public string Name { get; set; }
+    }
+
+    [Fact]
+    public async Task EmptyDuckDbFile() {
+        using Stream src = OpenTestFile("data_0.parquet");
+        IList<EmptyDuckDbFile_Model> r = (await ParquetSerializer.DeserializeAsync<EmptyDuckDbFile_Model>(src)).Data;
+    }
 }
