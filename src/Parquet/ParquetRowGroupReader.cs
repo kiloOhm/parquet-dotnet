@@ -388,6 +388,73 @@ public class ParquetRowGroupReader : IDisposable {
     }
 
     /// <summary>
+    /// Gets the row group's offset index for a data field when present.
+    /// </summary>
+    public OffsetIndex? GetOffsetIndex(DataField field) {
+        return ReadPageIndex(
+            field,
+            columnChunk => columnChunk.OffsetIndexOffset,
+            PageIndexIO.ReadOffsetIndex,
+            PageIndexIO.ReadEncryptedOffsetIndex);
+    }
+
+    /// <summary>
+    /// Gets the row group's column index for a data field when present.
+    /// </summary>
+    public ColumnIndex? GetColumnIndex(DataField field) {
+        return ReadPageIndex(
+            field,
+            columnChunk => columnChunk.ColumnIndexOffset,
+            PageIndexIO.ReadColumnIndex,
+            PageIndexIO.ReadEncryptedColumnIndex);
+    }
+
+    private TIndex? ReadPageIndex<TIndex>(
+        DataField field,
+        Func<ColumnChunk, long?> getOffset,
+        Func<Stream, ColumnChunk, Func<Stream, Meta.Proto.ThriftCompactProtocolReader>, TIndex> readPlain,
+        Func<Stream, ColumnChunk, ParquetCryptoContext, short, short, TIndex> readEncrypted)
+        where TIndex : class {
+        if(field == null)
+            throw new ArgumentNullException(nameof(field));
+
+        ColumnChunk columnChunk = GetMetadata(field)
+            ?? throw new ParquetException($"'{field.Path}' does not exist in this file");
+        if(!getOffset(columnChunk).HasValue)
+            return null;
+
+        int columnIndex = _rowGroup.Columns.IndexOf(columnChunk);
+        if(columnIndex < 0 || (_cryptoContext != null && columnIndex > short.MaxValue))
+            throw new InvalidDataException($"The ordinal for column '{field.Path}' is invalid.");
+
+        long position = _stream.Position;
+        try {
+            if(columnChunk.CryptoMetadata == null) {
+                return readPlain(
+                    _stream,
+                    columnChunk,
+                    stream => new Meta.Proto.ThriftCompactProtocolReader(stream));
+            }
+
+            if(_cryptoContext == null)
+                throw new InvalidDataException($"Column '{field.Path}' is encrypted, but no decryption properties are available.");
+            short rowGroupOrdinal = _rowGroup.Ordinal
+                ?? throw new InvalidDataException("The encrypted row group does not have an ordinal.");
+            ParquetCryptoContext columnCrypto = _cryptoContext.GetColumnDecryptionContext(
+                columnChunk,
+                field.Path.ToString());
+            return readEncrypted(
+                _stream,
+                columnChunk,
+                columnCrypto,
+                rowGroupOrdinal,
+                checked((short)columnIndex));
+        } finally {
+            _stream.Seek(position, SeekOrigin.Begin);
+        }
+    }
+
+    /// <summary>
     /// Returns false when the column chunk's Bloom filter proves that <paramref name="value"/> is absent.
     /// Returns true when it might be present or Bloom pruning is unavailable.
     /// </summary>

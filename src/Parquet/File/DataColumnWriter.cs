@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.IO;
 using Parquet.Bloom;
+using Parquet.Data;
 using Parquet.Encodings;
 using Parquet.Encryption;
 using Parquet.Extensions;
@@ -120,6 +121,7 @@ class DataColumnWriter {
         public int CompressedSize;
         public int UncompressedSize;
         public readonly List<PageHeader> Pages = new();
+        public readonly List<PageIndexEntry> DataPages = new();
 
         public List<Encoding> GetUsedEncodings() {
             var r = new HashSet<Encoding>();
@@ -140,11 +142,31 @@ class DataColumnWriter {
         }
     }
 
-    private async Task CompressAndWriteAsync(
+    private sealed class PageIndexEntry {
+        public PageLocation Location { get; set; } = new PageLocation();
+        public Statistics? Statistics { get; set; }
+        public int ValueCount { get; set; }
+    }
+
+    private sealed class PageWriteMetrics {
+        public long Offset { get; set; }
+        public int TotalSize { get; set; }
+    }
+
+    private sealed class PageSlice {
+        public int ValueOffset { get; set; }
+        public int ValueCount { get; set; }
+        public int DefinedValueOffset { get; set; }
+        public int DefinedValueCount { get; set; }
+        public long FirstRowIndex { get; set; }
+    }
+
+    private async Task<PageWriteMetrics> CompressAndWriteAsync(
         PageHeader ph, MemoryStream uncompressedData,
         ColumnMetrics cs,
         CancellationToken cancellationToken) {
 
+        long pageOffset = _stream.Position;
         int uncompressedLength = (int)uncompressedData.Length;
         using IMemoryOwner<byte> pageData = await Compressor.Instance.CompressAsync(
             _options.CompressionMethod, _options.CompressionLevel, uncompressedData);
@@ -167,6 +189,8 @@ class DataColumnWriter {
                     _pageOrdinal);
         }
         ph.CompressedPageSize = encryptedBody?.Length ?? compressedLength;
+
+        int writtenHeaderSize;
 
         //write the header in
         using(MemoryStream headerMs = _rmsMgr.GetStream()) {
@@ -194,6 +218,7 @@ class DataColumnWriter {
                 headerSize = encryptedHeader.Length;
             }
 
+            writtenHeaderSize = headerSize;
             cs.CompressedSize += headerSize;
             cs.UncompressedSize += _columnEncryption == null ? headerSize : checked((int)headerMs.Length);
         }
@@ -208,6 +233,11 @@ class DataColumnWriter {
         cs.UncompressedSize += ph.UncompressedPageSize;
         if(ph.Type != PageType.DICTIONARY_PAGE)
             _pageOrdinal = checked((short)(_pageOrdinal + 1));
+
+        return new PageWriteMetrics {
+            Offset = pageOffset,
+            TotalSize = checked(writtenHeaderSize + ph.CompressedPageSize)
+        };
     }
 
     private async Task<ColumnMetrics> WriteAsync<T>(ColumnChunk chunk,
@@ -217,6 +247,8 @@ class DataColumnWriter {
 
         wc.Field.EnsureAttachedToSchema(nameof(wc.Field));
         wc.Pack(_options);
+        if(!wc.HasDictionary)
+            ParquetPlainEncoder.Encode(wc.Values, Stream.Null, tse, wc.Statistics);
 
         var r = new ColumnMetrics();
         BloomCollector? bloom = null;
@@ -246,44 +278,70 @@ class DataColumnWriter {
             await CompressAndWriteAsync(ph, ms, r, cancellationToken);
         }
 
-        // data page
-        using(MemoryStream ms = _rmsMgr.GetStream()) {
-            chunk.MetaData!.DataPageOffset = _stream.Position;
-            bool deltaEncode = _options.GetEncodingHint(wc.Field) == EncodingHint.DeltaBinaryPacked && DeltaBinaryPackedEncoder.CanEncode(wc.Values);
-            bool byteSplitStreamEncode = _options.GetEncodingHint(wc.Field) == EncodingHint.ByteSplitStream && ByteStreamSplitEncoder.IsSupported(typeof(T));
+        bool wroteDataPageOffset = false;
+        foreach(PageSlice slice in BuildPageSlices(wc)) {
+            using MemoryStream ms = _rmsMgr.GetStream();
+            if(!wroteDataPageOffset) {
+                chunk.MetaData!.DataPageOffset = _stream.Position;
+                wroteDataPageOffset = true;
+            }
 
-            // data page Num_values also does include NULLs
-            PageHeader ph = _footer.CreateDataPage(wc.NumValues, wc.HasDictionary, deltaEncode, byteSplitStreamEncode, out DataPageHeader dph);
+            ReadOnlySpan<T> pageValues = wc.Values.Slice(slice.DefinedValueOffset, slice.DefinedValueCount);
+            bool deltaEncode = !wc.HasDictionary &&
+                _options.GetEncodingHint(wc.Field) == EncodingHint.DeltaBinaryPacked &&
+                DeltaBinaryPackedEncoder.CanEncode(pageValues);
+            bool byteSplitStreamEncode = !wc.HasDictionary &&
+                _options.GetEncodingHint(wc.Field) == EncodingHint.ByteSplitStream &&
+                ByteStreamSplitEncoder.IsSupported(typeof(T));
+
+            PageHeader ph = _footer.CreateDataPage(
+                slice.ValueCount,
+                wc.HasDictionary,
+                deltaEncode,
+                byteSplitStreamEncode,
+                out DataPageHeader dph);
             r.Pages.Add(ph);
 
-            if(wc.HasRepetitionLevels) {
-                WriteLevels(ms, wc.RepetitionLevels!, wc.Field.MaxRepetitionLevel);
-            }
-            if(wc.HasDefinitionLevels) {
-                WriteLevels(ms, wc.DefinitionLevels!, wc.Field.MaxDefinitionLevel);
-            }
+            if(wc.HasRepetitionLevels)
+                WriteLevels(ms, wc.RepetitionLevels.Slice(slice.ValueOffset, slice.ValueCount), wc.Field.MaxRepetitionLevel);
+            if(wc.HasDefinitionLevels)
+                WriteLevels(ms, wc.DefinitionLevels.Slice(slice.ValueOffset, slice.ValueCount), wc.Field.MaxDefinitionLevel);
+
+            var pageStats = new DataColumnStatistics {
+                NullCount = slice.ValueCount - slice.DefinedValueCount
+            };
 
             if(wc.HasDictionary) {
-                // dictionary indexes are always encoded with RLE
-                int bitWidth = wc.Dictionary.Length.GetBitWidth();  // bit width is determined by the dictionary size
-                ms.WriteByte((byte)bitWidth);   // bit width is stored as 1 byte before encoded data
-                RleBitpackedHybridEncoder.Encode(ms, wc.DictionaryIndexes, bitWidth);
+                int bitWidth = wc.Dictionary.Length.GetBitWidth();
+                ms.WriteByte((byte)bitWidth);
+                RleBitpackedHybridEncoder.Encode(
+                    ms,
+                    wc.DictionaryIndexes.Slice(slice.DefinedValueOffset, slice.DefinedValueCount),
+                    bitWidth);
+                ParquetPlainEncoder.Encode(pageValues, Stream.Null, tse, pageStats);
+            } else if(deltaEncode) {
+                DeltaBinaryPackedEncoder.Encode(pageValues, ms, pageStats);
+            } else if(byteSplitStreamEncode) {
+                ByteStreamSplitEncoder.Encode(pageValues, ms);
+                ParquetPlainEncoder.Encode(pageValues, Stream.Null, tse, pageStats);
             } else {
-                if(deltaEncode) {
-                    DeltaBinaryPackedEncoder.Encode(wc.Values, ms, wc.Statistics);
-                } else if(byteSplitStreamEncode) {
-                    ByteStreamSplitEncoder.Encode(wc.Values, ms);
-                } else {
-                    ParquetPlainEncoder.Encode(wc.Values,
-                        ms,
-                        tse,
-                        wc.HasDictionary ? null : wc.Statistics);
-                }
+                ParquetPlainEncoder.Encode(pageValues, ms, tse, pageStats);
             }
 
-            dph.Statistics = wc.Statistics.ToThriftStatistics(tse);
-            await CompressAndWriteAsync(ph, ms, r, cancellationToken);
+            dph.Statistics = pageStats.ToThriftStatistics(tse);
+            PageWriteMetrics pageMetrics = await CompressAndWriteAsync(ph, ms, r, cancellationToken);
+            r.DataPages.Add(new PageIndexEntry {
+                Location = new PageLocation {
+                    Offset = pageMetrics.Offset,
+                    CompressedPageSize = pageMetrics.TotalSize,
+                    FirstRowIndex = slice.FirstRowIndex
+                },
+                Statistics = dph.Statistics,
+                ValueCount = slice.ValueCount
+            });
         }
+
+        RegisterPageIndexes(chunk, r);
 
         if(bloom != null && chunk.MetaData != null) {
             BloomFilterIO.WriteToStream(
@@ -294,6 +352,124 @@ class DataColumnWriter {
         }
 
         return r;
+    }
+
+    private IReadOnlyList<PageSlice> BuildPageSlices<T>(WritingColumn<T> column) where T : struct {
+        int pageRowCountLimit = _options.DataPageRowCountLimit;
+        if(pageRowCountLimit <= 0) {
+            throw new ArgumentOutOfRangeException(
+                nameof(_options.DataPageRowCountLimit),
+                pageRowCountLimit,
+                "DataPageRowCountLimit must be greater than zero.");
+        }
+
+        int totalValueCount = column.NumValues;
+        int[] definedValueOffsets = new int[totalValueCount + 1];
+        if(column.HasDefinitionLevels) {
+            ReadOnlySpan<int> definitionLevels = column.DefinitionLevels;
+            for(int i = 0; i < totalValueCount; i++) {
+                definedValueOffsets[i + 1] = definedValueOffsets[i] +
+                    (definitionLevels[i] == column.Field.MaxDefinitionLevel ? 1 : 0);
+            }
+        } else {
+            for(int i = 0; i <= totalValueCount; i++)
+                definedValueOffsets[i] = i;
+        }
+
+        var slices = new List<PageSlice>();
+        void AddSlice(int valueOffset, int valueCount, long firstRowIndex) {
+            int definedValueOffset = definedValueOffsets[valueOffset];
+            slices.Add(new PageSlice {
+                ValueOffset = valueOffset,
+                ValueCount = valueCount,
+                DefinedValueOffset = definedValueOffset,
+                DefinedValueCount = definedValueOffsets[valueOffset + valueCount] - definedValueOffset,
+                FirstRowIndex = firstRowIndex
+            });
+        }
+
+        if(totalValueCount == 0) {
+            AddSlice(0, 0, 0);
+            return slices;
+        }
+
+        if(!column.HasRepetitionLevels) {
+            for(int valueOffset = 0; valueOffset < totalValueCount; valueOffset += pageRowCountLimit) {
+                int valueCount = Math.Min(pageRowCountLimit, totalValueCount - valueOffset);
+                AddSlice(valueOffset, valueCount, valueOffset);
+            }
+            return slices;
+        }
+
+        ReadOnlySpan<int> repetitionLevels = column.RepetitionLevels;
+        int pageStart = 0;
+        long firstRowIndex = 0;
+        while(pageStart < totalValueCount) {
+            int pageEnd = pageStart;
+            int rowCount = 0;
+            while(pageEnd < totalValueCount) {
+                if(repetitionLevels[pageEnd] == 0) {
+                    if(rowCount == pageRowCountLimit && pageEnd > pageStart)
+                        break;
+                    rowCount++;
+                }
+                pageEnd++;
+            }
+
+            AddSlice(pageStart, pageEnd - pageStart, firstRowIndex);
+            pageStart = pageEnd;
+            firstRowIndex += rowCount;
+        }
+
+        return slices;
+    }
+
+    private void RegisterPageIndexes(ColumnChunk chunk, ColumnMetrics metrics) {
+        if(metrics.DataPages.Count == 0)
+            return;
+
+        var offsetIndex = new OffsetIndex {
+            PageLocations = metrics.DataPages.Select(page => page.Location).ToList()
+        };
+        _footer.RegisterPageIndex(
+            chunk,
+            offsetIndex,
+            TryBuildColumnIndex(metrics),
+            _columnEncryption?.Crypto,
+            _rowGroupOrdinal,
+            _columnOrdinal);
+    }
+
+    private static ColumnIndex? TryBuildColumnIndex(ColumnMetrics metrics) {
+        var nullPages = new List<bool>(metrics.DataPages.Count);
+        var minValues = new List<byte[]>(metrics.DataPages.Count);
+        var maxValues = new List<byte[]>(metrics.DataPages.Count);
+        var nullCounts = new List<long>(metrics.DataPages.Count);
+
+        foreach(PageIndexEntry page in metrics.DataPages) {
+            Statistics? stats = page.Statistics;
+            if(stats == null)
+                return null;
+
+            bool isNullPage = stats.NullCount == page.ValueCount &&
+                stats.MinValue == null &&
+                stats.MaxValue == null;
+            if(!isNullPage && (stats.MinValue == null || stats.MaxValue == null))
+                return null;
+
+            nullPages.Add(isNullPage);
+            minValues.Add(isNullPage ? Array.Empty<byte>() : stats.MinValue!);
+            maxValues.Add(isNullPage ? Array.Empty<byte>() : stats.MaxValue!);
+            nullCounts.Add(stats.NullCount ?? 0);
+        }
+
+        return new ColumnIndex {
+            NullPages = nullPages,
+            MinValues = minValues,
+            MaxValues = maxValues,
+            BoundaryOrder = BoundaryOrder.UNORDERED,
+            NullCounts = nullCounts
+        };
     }
 
     private static void BloomAddValues<T>(BloomCollector bloom, ReadOnlySpan<T> values, SchemaElement schemaElement)

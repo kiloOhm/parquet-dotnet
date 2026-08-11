@@ -86,6 +86,12 @@ public class ParquetOptions {
     public int MaximumLargePoolFreeBytes { get; set; } = 64 * 1024 * 1024;
 
     /// <summary>
+    /// Maximum number of rows written to a single data page.
+    /// Pages are split on row boundaries so page indexes contain valid first-row offsets.
+    /// </summary>
+    public int DataPageRowCountLimit { get; set; } = 20_000;
+
+    /// <summary>
     /// Gets the Bloom filter options keyed by column name.
     /// </summary>
     public Dictionary<string, BloomFilterOptions> BloomFilterOptionsByColumn { get; set; } = new();

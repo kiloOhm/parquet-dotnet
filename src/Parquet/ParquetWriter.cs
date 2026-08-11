@@ -151,6 +151,8 @@ public sealed class ParquetWriter : ParquetActor, IAsyncDisposable {
         if(_footer == null)
             return;
 
+        await _footer.WritePageIndexesAsync(Stream).ConfigureAwait(false);
+
         byte[] footerBytes = _footer.Serialize();
         int size;
         if(_cryptoContext == null) {

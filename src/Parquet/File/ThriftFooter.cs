@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Parquet.Encodings;
+using Parquet.Encryption;
 using Parquet.Meta;
 using Parquet.Meta.Proto;
 using Parquet.Schema;
@@ -16,6 +17,8 @@ class ThriftFooter {
     private readonly FileMetaData _fileMeta;
     private readonly ThriftSchemaTree _tree;
     private readonly Dictionary<ColumnChunk, ColumnMetaData> _runtimeColumnMetadata = new();
+    private readonly Dictionary<ColumnChunk, PendingPageIndex> _pendingPageIndexes = new();
+    private bool _pageIndexesWritten;
 
     internal static ThriftFooter Empty => new();
 
@@ -221,6 +224,61 @@ class ThriftFooter {
         return ph;
     }
 
+    internal void RegisterPageIndex(
+        ColumnChunk columnChunk,
+        OffsetIndex offsetIndex,
+        ColumnIndex? columnIndex,
+        ParquetCryptoContext? cryptoContext,
+        short rowGroupOrdinal,
+        short columnOrdinal) {
+        if(columnChunk == null)
+            throw new ArgumentNullException(nameof(columnChunk));
+        if(offsetIndex == null)
+            throw new ArgumentNullException(nameof(offsetIndex));
+
+        _pendingPageIndexes[columnChunk] = new PendingPageIndex {
+            OffsetIndexBytes = SerializeOffsetIndex(offsetIndex, cryptoContext, rowGroupOrdinal, columnOrdinal),
+            ColumnIndexBytes = columnIndex == null
+                ? null
+                : SerializeColumnIndex(columnIndex, cryptoContext, rowGroupOrdinal, columnOrdinal)
+        };
+        _pageIndexesWritten = false;
+    }
+
+    internal async Task WritePageIndexesAsync(Stream output, CancellationToken cancellationToken = default) {
+        if(output == null)
+            throw new ArgumentNullException(nameof(output));
+        if(_pageIndexesWritten || _pendingPageIndexes.Count == 0)
+            return;
+
+        foreach(RowGroup rowGroup in _fileMeta.RowGroups) {
+            foreach(ColumnChunk columnChunk in rowGroup.Columns) {
+                if(_pendingPageIndexes.TryGetValue(columnChunk, out PendingPageIndex? pending) &&
+                   pending.ColumnIndexBytes != null) {
+                    await WriteModuleAsync(
+                        output,
+                        columnChunk,
+                        pending.ColumnIndexBytes,
+                        isOffsetIndex: false,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            foreach(ColumnChunk columnChunk in rowGroup.Columns) {
+                if(_pendingPageIndexes.TryGetValue(columnChunk, out PendingPageIndex? pending)) {
+                    await WriteModuleAsync(
+                        output,
+                        columnChunk,
+                        pending.OffsetIndexBytes,
+                        isOffsetIndex: true,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        _pageIndexesWritten = true;
+    }
+
     #region [ Conversion to Model Schema ]
 
     public ParquetSchema CreateModelSchema(ParquetOptions formatOptions) {
@@ -286,6 +344,55 @@ class ThriftFooter {
     #endregion
 
     #region [ Helpers ]
+
+    private static byte[] SerializeOffsetIndex(
+        OffsetIndex offsetIndex,
+        ParquetCryptoContext? cryptoContext,
+        short rowGroupOrdinal,
+        short columnOrdinal) {
+        using var ms = new MemoryStream();
+        offsetIndex.Write(new ThriftCompactProtocolWriter(ms));
+        byte[] plain = ms.ToArray();
+        return cryptoContext == null
+            ? plain
+            : cryptoContext.Encrypt(plain, ParquetModuleType.OffsetIndex, rowGroupOrdinal, columnOrdinal);
+    }
+
+    private static byte[] SerializeColumnIndex(
+        ColumnIndex columnIndex,
+        ParquetCryptoContext? cryptoContext,
+        short rowGroupOrdinal,
+        short columnOrdinal) {
+        using var ms = new MemoryStream();
+        columnIndex.Write(new ThriftCompactProtocolWriter(ms));
+        byte[] plain = ms.ToArray();
+        return cryptoContext == null
+            ? plain
+            : cryptoContext.Encrypt(plain, ParquetModuleType.ColumnIndex, rowGroupOrdinal, columnOrdinal);
+    }
+
+    private static async Task WriteModuleAsync(
+        Stream output,
+        ColumnChunk columnChunk,
+        byte[] bytes,
+        bool isOffsetIndex,
+        CancellationToken cancellationToken) {
+        long offset = output.Position;
+        await output.WriteAsync(bytes, 0, bytes.Length, cancellationToken).ConfigureAwait(false);
+
+        if(isOffsetIndex) {
+            columnChunk.OffsetIndexOffset = offset;
+            columnChunk.OffsetIndexLength = bytes.Length;
+        } else {
+            columnChunk.ColumnIndexOffset = offset;
+            columnChunk.ColumnIndexLength = bytes.Length;
+        }
+    }
+
+    private sealed class PendingPageIndex {
+        public byte[] OffsetIndexBytes { get; set; } = Array.Empty<byte>();
+        public byte[]? ColumnIndexBytes { get; set; }
+    }
 
     class ThriftSchemaTree {
 
