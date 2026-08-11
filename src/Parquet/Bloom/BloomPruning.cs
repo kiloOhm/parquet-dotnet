@@ -1,5 +1,4 @@
 ﻿using System;
-using Parquet.Data;
 using Parquet.Meta;
 using Encoding = System.Text.Encoding;
 
@@ -30,10 +29,10 @@ namespace Parquet.Bloom {
                     return bloom.MightContain(PlainLE.Int64((long)Convert.ChangeType(value, typeof(long))));
 
                 case Parquet.Meta.Type.FLOAT:
-                    return bloom.MightContain(PlainLE.Single(value is float f ? f : Convert.ToSingle(value)));
+                    return bloom.MightContain(PlainLE.Single((float)Convert.ChangeType(value, typeof(float))));
 
                 case Parquet.Meta.Type.DOUBLE:
-                    return bloom.MightContain(PlainLE.Double(value is double d ? d : Convert.ToDouble(value)));
+                    return bloom.MightContain(PlainLE.Double((double)Convert.ChangeType(value, typeof(double))));
 
                 case Parquet.Meta.Type.BYTE_ARRAY: {
                         if(value is byte[] bytes)
@@ -99,8 +98,38 @@ namespace Parquet.Bloom {
             }
 
             public static byte[] Int96(DateTime utcOrLocal) {
+                // INT96 is (nanoseconds of day [8 bytes]) + (Julian day [4 bytes]), little-endian.
+                // Treat timestamps as UTC (INT96 is timezone-agnostic; most writers used UTC).
                 DateTime dtUtc = utcOrLocal.Kind == DateTimeKind.Utc ? utcOrLocal : utcOrLocal.ToUniversalTime();
-                return new NanoTime(dtUtc).GetBytes();
+
+                int julianDay = ToJulianDay(dtUtc.Year, dtUtc.Month, dtUtc.Day);
+                long nanosOfDay = (dtUtc - dtUtc.Date).Ticks * 100L; // 1 tick = 100 ns
+
+                byte[] buf = new byte[12];
+                // write nanosOfDay (8 LE)
+                byte[] n = BitConverter.GetBytes(nanosOfDay);
+                // write julianDay (4 LE)
+                byte[] j = BitConverter.GetBytes(julianDay);
+
+                if(!BitConverter.IsLittleEndian) { Array.Reverse(n); Array.Reverse(j); }
+
+                Buffer.BlockCopy(n, 0, buf, 0, 8);
+                Buffer.BlockCopy(j, 0, buf, 8, 4);
+                return buf;
+            }
+
+            private static int ToJulianDay(int year, int month, int day) {
+                // Proleptic Gregorian calendar → Julian Day Number (integer)
+                int a = (14 - month) / 12;
+                int y = year + 4800 - a;
+                int m = month + (12 * a) - 3;
+                return day
+                    + (((153 * m) + 2) / 5)
+                    + (365 * y)
+                    + (y / 4)
+                    - (y / 100)
+                    + (y / 400)
+                    - 32045;
             }
         }
     }

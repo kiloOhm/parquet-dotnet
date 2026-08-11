@@ -1,6 +1,5 @@
 ﻿using System;
 using System.IO;
-using Parquet.Encryption;
 using Parquet.Meta;
 using Parquet.Meta.Proto;
 
@@ -14,10 +13,7 @@ namespace Parquet.Bloom {
             Stream output,
             SplitBlockBloomFilter filter,
             ColumnMetaData columnMeta,
-            Func<Stream, ThriftCompactProtocolWriter> writerFactory,
-            EncryptionBase? encrypter = null,
-            short rowGroupOrdinal = 0,
-            short columnOrdinal = 0) {
+            Func<Stream, ThriftCompactProtocolWriter> writerFactory) {
             if(output == null)
                 throw new ArgumentNullException("output");
             if(filter == null)
@@ -38,22 +34,11 @@ namespace Parquet.Bloom {
                 Compression = new BloomFilterCompression { UNCOMPRESSED = new Uncompressed() }
             };
 
-            byte[] hdrBytes;
-            using(var ms = new MemoryStream()) {
-                ThriftCompactProtocolWriter proto = writerFactory(ms);
-                hdr.Write(proto);
-                hdrBytes = ms.ToArray();
-            }
+            ThriftCompactProtocolWriter proto = writerFactory(output);
+            hdr.Write(proto);
+
             byte[] bitset = filter.ToByteArray();
-            if(encrypter != null) {
-                byte[] encHeader = encrypter.EncryptBloomFilterHeader(hdrBytes, rowGroupOrdinal, columnOrdinal);
-                byte[] encBitset = encrypter.EncryptBloomFilterBitset(bitset, rowGroupOrdinal, columnOrdinal);
-                output.Write(encHeader, 0, encHeader.Length);
-                output.Write(encBitset, 0, encBitset.Length);
-            } else {
-                output.Write(hdrBytes, 0, hdrBytes.Length);
-                output.Write(bitset, 0, bitset.Length);
-            }
+            output.Write(bitset, 0, bitset.Length);
 
             int length = checked((int)(output.Position - offset));
 
@@ -111,48 +96,6 @@ namespace Parquet.Bloom {
 
             int blocks = numBytes / 32;
             return SplitBlockBloomFilter.FromByteArray(blocks, data);
-        }
-
-        public static SplitBlockBloomFilter ReadEncryptedFromStream(
-            Stream input,
-            EncryptionBase decrypter,
-            short rowGroupOrdinal,
-            short columnOrdinal,
-            Func<byte[], ThriftCompactProtocolReader> readerFactory) {
-            if(input == null)
-                throw new ArgumentNullException(nameof(input));
-            if(decrypter == null)
-                throw new ArgumentNullException(nameof(decrypter));
-            if(readerFactory == null)
-                throw new ArgumentNullException(nameof(readerFactory));
-            if(!input.CanRead)
-                throw new InvalidOperationException("Input stream not readable.");
-            if(!input.CanSeek)
-                throw new InvalidOperationException("Input stream must be seekable to read bloom filter.");
-
-            byte[] headerBytes = decrypter.BloomFilterHeader(
-                new ThriftCompactProtocolReader(input),
-                rowGroupOrdinal,
-                columnOrdinal);
-            BloomFilterHeader hdr = BloomFilterHeader.Read(readerFactory(headerBytes));
-
-            if(hdr.Algorithm?.BLOCK == null)
-                throw new NotSupportedException("Unsupported bloom filter algorithm (only BLOCK is supported).");
-            if(hdr.Hash?.XXHASH == null)
-                throw new NotSupportedException("Unsupported bloom filter hash (only XXHASH is supported).");
-            if(hdr.Compression?.UNCOMPRESSED == null)
-                throw new NotSupportedException("Unsupported bloom filter compression (only UNCOMPRESSED is supported).");
-            if(hdr.NumBytes <= 0 || (hdr.NumBytes % 32) != 0)
-                throw new InvalidDataException("Invalid bloom filter header: NumBytes must be positive and a multiple of 32.");
-
-            byte[] bitset = decrypter.BloomFilterBitset(
-                new ThriftCompactProtocolReader(input),
-                rowGroupOrdinal,
-                columnOrdinal);
-            if(bitset.Length != hdr.NumBytes)
-                throw new InvalidDataException("Bloom filter bitset length does not match header NumBytes.");
-
-            return SplitBlockBloomFilter.FromByteArray(hdr.NumBytes / 32, bitset);
         }
     }
 }

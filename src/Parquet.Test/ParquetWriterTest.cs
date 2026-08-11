@@ -407,18 +407,6 @@ public class ParquetWriterTest : TestBase {
                 Assert.Equal(input, values);
             }
         }
-
-        class FlushCountingStream : DelegatedStream {
-            public int FlushCount { get; private set; }
-
-            public FlushCountingStream(Stream master) : base(master) {
-            }
-
-            public override void Flush() {
-                FlushCount++;
-                base.Flush();
-            }
-        }
     }
 
     [Theory]

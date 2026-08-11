@@ -1,6 +1,4 @@
-﻿using System.IO;
-using System.Linq;
-using Parquet.File;
+﻿using System.Linq;
 using Parquet.Meta;
 using Parquet.Schema;
 

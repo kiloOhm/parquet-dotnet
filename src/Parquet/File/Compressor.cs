@@ -1,11 +1,8 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.IO;
 using System.IO.Compression;
 using System.Threading.Tasks;
-#if NET48
-using BrotliStream = BrotliSharpLib.BrotliStream;
-#endif
 using CommunityToolkit.HighPerformance.Buffers;
 using K4os.Compression.LZ4;
 using Parquet.Extensions;
@@ -116,7 +113,6 @@ class DefaultCompressor : ICompressor {
         using(BrotliStream? brotli = new BrotliStream(ms, level, leaveOpen: true)) {
             await source.CopyToAsync(brotli);
         }
-#endif
         int len = (int)ms.Length;
         var owner = MemoryOwner<byte>.Allocate(len);
         byte[] buf = ms.GetBuffer();

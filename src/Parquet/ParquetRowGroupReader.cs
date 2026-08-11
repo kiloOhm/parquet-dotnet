@@ -13,7 +13,6 @@ using Parquet.Encodings;
 using Parquet.Extensions;
 using Parquet.File;
 using Parquet.Meta;
-using Parquet.Meta.Proto;
 using Parquet.Schema;
 using SType = System.Type;
 
@@ -401,9 +400,28 @@ public class ParquetRowGroupReader : IDisposable {
         DataColumnStatistics statistics = ReadColumnStatistics(columnChunk)
             ?? new DataColumnStatistics(null, null, null, null);
 
+        int columnIndex = _rowGroup.Columns.IndexOf(columnChunk);
+        if(columnIndex < 0 || (_cryptoContext != null && columnIndex > short.MaxValue))
+            throw new InvalidDataException($"The ordinal for column '{field.Path}' is invalid.");
+        ParquetCryptoContext? columnCrypto = null;
+        if(columnChunk.CryptoMetadata != null) {
+            if(_cryptoContext == null)
+                throw new InvalidDataException($"Column '{field.Path}' is encrypted, but no decryption properties are available.");
+            columnCrypto = _cryptoContext.GetColumnDecryptionContext(columnChunk, field.Path.ToString());
+        }
+
         long position = _stream.CanSeek ? _stream.Position : 0;
         try {
-            var columnReader = new DataColumnReader(field, _stream, columnChunk, statistics, _footer, _options);
+            var columnReader = new DataColumnReader(
+                field,
+                _stream,
+                columnChunk,
+                statistics,
+                _footer,
+                _options,
+                columnCrypto,
+                _rowGroup.Ordinal ?? 0,
+                _cryptoContext == null ? (short)0 : checked((short)columnIndex));
             return columnReader.MightMatchEquals(value);
         } finally {
             if(_stream.CanSeek)

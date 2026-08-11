@@ -5,11 +5,6 @@ using Xunit;
 namespace Parquet.Test.Bloom {
     public class BloomHashTest {
         [Fact]
-        public void Hash_EmptySpan_Matches_XxHash64_Spec_Vector() {
-            Assert.Equal(0xEF46DB3751D8E999UL, Parquet.Bloom.BloomHasher.HashPlainEncoded(Array.Empty<byte>()));
-        }
-
-        [Fact]
         public void Hash_Int32_IsStable() {
             byte[] bytes = new byte[4];
             BinaryPrimitives.WriteInt32LittleEndian(bytes, 12345);

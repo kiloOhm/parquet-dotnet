@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
@@ -50,9 +50,6 @@ class DataColumnWriter {
         _columnOrdinal = columnOrdinal;
         _rmsMgr.Settings.MaximumSmallPoolFreeBytes = options.MaximumSmallPoolFreeBytes;
         _rmsMgr.Settings.MaximumLargePoolFreeBytes = options.MaximumLargePoolFreeBytes;
-        _rowGroupOrdinal = rowGroupOrdinal;
-        _columnOrdinal = columnOrdinal;
-        _pageOrdinal = 0;
     }
 
     public async Task<ColumnChunk> WriteAsync<T>(
@@ -123,7 +120,6 @@ class DataColumnWriter {
         public int CompressedSize;
         public int UncompressedSize;
         public readonly List<PageHeader> Pages = new();
-        public readonly List<PageIndexEntry> DataPages = new();
 
         public List<Encoding> GetUsedEncodings() {
             var r = new HashSet<Encoding>();
@@ -144,37 +140,15 @@ class DataColumnWriter {
         }
     }
 
-    class PageIndexEntry {
-        public PageLocation Location { get; set; } = new PageLocation();
-        public Statistics? Statistics { get; set; }
-        public long? UnencodedByteArrayDataBytes { get; set; }
-        public int ValueCount { get; set; }
-    }
-
-    class PageWriteMetrics {
-        public long Offset { get; set; }
-        public int TotalSize { get; set; }
-    }
-
-    class PageSlice {
-        public int ValueOffset { get; set; }
-        public int ValueCount { get; set; }
-        public int DefinedValueOffset { get; set; }
-        public int DefinedValueCount { get; set; }
-        public long FirstRowIndex { get; set; }
-    }
-
-    private async Task<PageWriteMetrics> CompressAndWriteAsync(
+    private async Task CompressAndWriteAsync(
         PageHeader ph, MemoryStream uncompressedData,
         ColumnMetrics cs,
-        Encryption.EncryptionBase? encrForThisColumn,
         CancellationToken cancellationToken) {
 
         int uncompressedLength = (int)uncompressedData.Length;
         using IMemoryOwner<byte> pageData = await Compressor.Instance.CompressAsync(
             _options.CompressionMethod, _options.CompressionLevel, uncompressedData);
         int compressedLength = pageData.Memory.Length;
-        long pageOffset = _stream.Position;
 
         ph.UncompressedPageSize = uncompressedLength;
         byte[]? encryptedBody = null;
@@ -194,11 +168,12 @@ class DataColumnWriter {
         }
         ph.CompressedPageSize = encryptedBody?.Length ?? compressedLength;
 
-            //write the header in
-            using(MemoryStream headerMs = _rmsMgr.GetStream()) {
-                ph.Write(new Meta.Proto.ThriftCompactProtocolWriter(headerMs));
-                int headerSize = (int)headerMs.Length;
-                headerMs.Position = 0;
+        //write the header in
+        using(MemoryStream headerMs = _rmsMgr.GetStream()) {
+            ph.Write(new Meta.Proto.ThriftCompactProtocolWriter(headerMs));
+            int headerSize = (int)headerMs.Length;
+            headerMs.Position = 0;
+            _stream.Flush();
 
             if(_columnEncryption == null) {
                 await headerMs.CopyToAsync(_stream);

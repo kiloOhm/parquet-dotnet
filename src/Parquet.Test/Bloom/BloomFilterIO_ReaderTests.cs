@@ -16,13 +16,6 @@ namespace Parquet.Test.Bloom {
         private static ThriftCompactProtocolWriter MakeWriter(Stream s) => new ThriftCompactProtocolWriter(s);
         private static ThriftCompactProtocolReader MakeReader(Stream s) => new ThriftCompactProtocolReader(s);
 
-        private static void WriteHeaderAtOffset(MemoryStream ms, ColumnMetaData meta, BloomFilterHeader header) {
-            ms.WriteByte(0x00);
-            long offset = ms.Position;
-            header.Write(new ThriftCompactProtocolWriter(ms));
-            meta.BloomFilterOffset = offset;
-        }
-
         /// <summary>
         /// Writes a <see cref="SplitBlockBloomFilter"/> (header + bitset) to a stream,
         /// records the offset in <see cref="ColumnMetaData.BloomFilterOffset"/>,
@@ -75,43 +68,28 @@ namespace Parquet.Test.Bloom {
         /// </summary>
         [Fact]
         public void Read_Rejects_Invalid_Header_NumBytes() {
+            // Hand-craft a header with NumBytes = 1 (invalid), then try to read.
             using(MemoryStream ms = new MemoryStream()) {
                 ColumnMetaData meta = new ColumnMetaData();
-                WriteHeaderAtOffset(ms, meta, new BloomFilterHeader {
-                    NumBytes = 1,
-                    Algorithm = new BloomFilterAlgorithm { BLOCK = new SplitBlockAlgorithm() },
-                    Hash = new BloomFilterHash { XXHASH = new XxHash() },
-                    Compression = new BloomFilterCompression { UNCOMPRESSED = new Uncompressed() }
-                });
+
+                // write at non-zero position
+                ms.WriteByte(0x00);
+                long offset = ms.Position;
+
+                BloomFilterHeader bad = new BloomFilterHeader();
+                bad.NumBytes = 1; // invalid (not multiple of 32)
+                bad.Algorithm = new BloomFilterAlgorithm { BLOCK = new SplitBlockAlgorithm() };
+                bad.Hash = new BloomFilterHash { XXHASH = new XxHash() };
+                bad.Compression = new BloomFilterCompression { UNCOMPRESSED = new Uncompressed() };
+
+                ThriftCompactProtocolWriter writer = new ThriftCompactProtocolWriter(ms);
+                bad.Write(writer);
+
+                meta.BloomFilterOffset = offset;
+                // No bitset written
 
                 Assert.Throws<InvalidDataException>(() => BloomFilterIO.ReadFromStream(ms, meta, s => new ThriftCompactProtocolReader(s)));
             }
-        }
-
-        [Theory]
-        [InlineData("algorithm")]
-        [InlineData("hash")]
-        [InlineData("compression")]
-        public void Read_Rejects_Unsupported_Header_Fields(string invalidPart) {
-            using MemoryStream ms = new MemoryStream();
-            ColumnMetaData meta = new ColumnMetaData();
-
-            BloomFilterHeader bad = new BloomFilterHeader {
-                NumBytes = 32,
-                Algorithm = invalidPart == "algorithm"
-                    ? new BloomFilterAlgorithm()
-                    : new BloomFilterAlgorithm { BLOCK = new SplitBlockAlgorithm() },
-                Hash = invalidPart == "hash"
-                    ? new BloomFilterHash()
-                    : new BloomFilterHash { XXHASH = new XxHash() },
-                Compression = invalidPart == "compression"
-                    ? new BloomFilterCompression()
-                    : new BloomFilterCompression { UNCOMPRESSED = new Uncompressed() }
-            };
-
-            WriteHeaderAtOffset(ms, meta, bad);
-
-            Assert.Throws<NotSupportedException>(() => BloomFilterIO.ReadFromStream(ms, meta, s => new ThriftCompactProtocolReader(s)));
         }
 
         /// <summary>

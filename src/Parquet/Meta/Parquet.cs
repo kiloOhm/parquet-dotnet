@@ -1,7 +1,6 @@
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
-using System;
+using System.Linq;
 using System.Collections.Generic;
-using Parquet.Encryption;
 using Parquet.Meta.Proto;
 
 namespace Parquet.Meta;

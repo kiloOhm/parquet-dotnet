@@ -60,29 +60,5 @@ namespace Parquet.Test.Bloom {
             Assert.Throws<ArgumentOutOfRangeException>(() => SplitBlockBloomFilter.BytesForBlocks(0));
             Assert.Throws<ArgumentOutOfRangeException>(() => SplitBlockBloomFilter.FromByteArray(0, Array.Empty<byte>()));
         }
-
-        [Fact]
-        public void MapHashToBlock_Uses_MostSignificant_32_Bits_Per_Spec() {
-            ulong hash = 0x12345678_9ABCDEF0UL;
-            int blocks = 17;
-
-            Assert.Equal(1, SplitBlockBloomFilter.MapHashToBlock(hash, blocks));
-        }
-
-        [Fact]
-        public void ComputeMasksFor_Matches_Spec_Bit_Selection() {
-            uint[] masks = SplitBlockBloomFilter.ComputeMasksFor(0x9ABCDEF0U);
-
-            Assert.Equal(new uint[] {
-                0x00002000U,
-                0x00400000U,
-                0x00008000U,
-                0x00100000U,
-                0x00000800U,
-                0x00000004U,
-                0x00000800U,
-                0x00000080U
-            }, masks);
-        }
     }
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -83,7 +83,7 @@ public sealed class ParquetWriter : ParquetActor, IAsyncDisposable {
                 throw new IOException("destination stream must be seekable for append operations.");
 
             if(Stream.Length == 0)
-                throw new IOException("you can only append to existing streams, but current stream is empty.");
+                throw new IOException($"you can only append to existing streams, but current stream is empty.");
 
             await ValidateFileAsync();
 
@@ -99,71 +99,6 @@ public sealed class ParquetWriter : ParquetActor, IAsyncDisposable {
             ValidateSchemasCompatible(_footer, _schema);
 
             await GoBeforeFooterAsync();
-            return;
-        }
-
-        // -------- New unified setup for fresh files (non-append) --------
-
-        // Guard AAD prefix option
-        if(_formatOptions.SupplyAadPrefix && string.IsNullOrWhiteSpace(_formatOptions.AADPrefix))
-            throw new ArgumentException("SupplyAadPrefix=true requires AADPrefix to be set.");
-
-        byte[]? aadPrefixBytes = _formatOptions.AADPrefix is null
-            ? null
-            : System.Text.Encoding.UTF8.GetBytes(_formatOptions.AADPrefix);
-
-        bool wantsEncryptedFooter =
-            !string.IsNullOrWhiteSpace(_formatOptions.FooterEncryptionKey) &&
-            !_formatOptions.UsePlaintextFooter;
-
-        bool hasColumnKeys =
-            _formatOptions.ColumnKeys is not null && _formatOptions.ColumnKeys.Count > 0;
-
-        // Optional: allow encrypting pages with the footer key even when PF is requested.
-        bool wantsFooterKeyPagesInPF =
-            _formatOptions.UsePlaintextFooter &&
-            !string.IsNullOrWhiteSpace(_formatOptions.FooterEncryptionKey);
-
-        // --- Create encrypter when needed ---
-        // EF mode â†’ encrypter with FooterEncryptionKey (used for footer + pages).
-        if(wantsEncryptedFooter) {
-            (_encrypter, _cryptoMeta) = EncryptionBase.CreateEncryptorForWrite(
-                _formatOptions.FooterEncryptionKey!,
-                aadPrefixBytes,
-                supplyAadPrefix: _formatOptions.SupplyAadPrefix,
-                useCtrVariant: _formatOptions.UseCtrVariant
-            );
-            _encrypter = _encrypter ?? throw new InvalidOperationException("encrypter was not created");
-            _cryptoMeta.KeyMetadata = _formatOptions.FooterEncryptionKeyMetadata;
-        }
-        // PF mode â†’ still create encrypter if any encryption is desired (column keys and/or footer-key pages).
-        else if(_formatOptions.UsePlaintextFooter && (hasColumnKeys || wantsFooterKeyPagesInPF)) {
-            // IMPORTANT: use FooterEncryptionKey for page encryption when present.
-            string seedKey =
-                !string.IsNullOrWhiteSpace(_formatOptions.FooterEncryptionKey)
-                    ? _formatOptions.FooterEncryptionKey!
-                    // no footer key â†’ only column-key encryption; seed with random (column writers swap keys per column)
-                    : BitConverter.ToString(CryptoHelpers.GetRandomBytes(32)).Replace("-", ""); // 256-bit random hex
-
-            (_encrypter, _cryptoMeta) = EncryptionBase.CreateEncryptorForWrite(
-                seedKey,
-                aadPrefixBytes,
-                supplyAadPrefix: _formatOptions.SupplyAadPrefix,
-                useCtrVariant: _formatOptions.UseCtrVariant
-            );
-            _encrypter = _encrypter ?? throw new InvalidOperationException("encrypter was not created");
-            if(wantsFooterKeyPagesInPF) {
-                _cryptoMeta.KeyMetadata = _formatOptions.FooterEncryptionKeyMetadata;
-            }
-        }
-
-        // --- Build footer and write head magic ---
-        if(_footer == null) {
-            _footer = new ThriftFooter(_schema, 0, _formatOptions);
-            _footer.Encrypter = _encrypter;
-
-            bool encryptedFooterMode = _encrypter != null && !_formatOptions.UsePlaintextFooter;
-            await WriteMagicAsync(encrypted: encryptedFooterMode);
         } else {
             if(_footer == null) {
                 if(_options.Encryption != null)
@@ -175,21 +110,10 @@ public sealed class ParquetWriter : ParquetActor, IAsyncDisposable {
                     _footer.FileMetaData.FooterSigningKeyMetadata = _cryptoContext.FooterKeyMetadata;
                 }
 
-        // --- Plaintext footer (PF) signing setup (PAR1 tail, optional signature trailer) ---
-        if(_formatOptions.UsePlaintextFooter && !string.IsNullOrWhiteSpace(_formatOptions.FooterSigningKey)) {
-            (EncryptionBase? encTmp, FileCryptoMetaData? signMeta) = EncryptionBase.CreateEncryptorForWrite(
-                _formatOptions.FooterSigningKey!,
-                aadPrefixBytes,
-                supplyAadPrefix: _formatOptions.SupplyAadPrefix,
-                useCtrVariant: _formatOptions.UseCtrVariant
-            );
-
-            // IMPORTANT: Advertise algorithm using the SAME aad_file_unique as pages.
-            if(_cryptoMeta is not null) {
-                _plaintextAlg = _cryptoMeta.EncryptionAlgorithm;     // from PAGE ENCRYPTER
+                //file starts with magic
+                await WriteMagicAsync();
             } else {
-                _plaintextAlg = signMeta.EncryptionAlgorithm;        // no page encrypter (column-keys only)
-            }
+                ValidateSchemasCompatible(_footer, _schema);
 
                 // it's set to 0 with expectation that row count will be updated at the end of writing (see DisposeCore)
                 _footer.Add(0);
@@ -223,9 +147,9 @@ public sealed class ParquetWriter : ParquetActor, IAsyncDisposable {
     /// </summary>
     public async ValueTask DisposeAsync() {
         DisposeCore();
-        if(_footer == null) {
+
+        if(_footer == null)
             return;
-        }
 
         byte[] footerBytes = _footer.Serialize();
         int size;

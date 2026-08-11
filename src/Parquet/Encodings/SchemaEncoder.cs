@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -237,11 +237,7 @@ static class SchemaEncoder {
         // --- float16
 
         if(se.LogicalType?.FLOAT16 != null) {
-#if NET48
-            return null;
-#else
             return typeof(System.Half);
-#endif
         }
 
         // --- temporal types
