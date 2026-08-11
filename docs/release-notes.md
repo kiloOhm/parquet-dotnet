@@ -1,8 +1,29 @@
 # 6.1.1-pre.1
 
+Prerelease of the forked `kiloOhm.Parquet.Net` and
+`kiloOhm.Parquet.Net.Data.Analysis` packages, based on upstream 6.1.0.
+
+## Fork changes
+
+- Ported Parquet modular encryption to the 6.1 APIs, including encrypted and
+  plaintext footers, AES-GCM and AES-GCM-CTR, stored or external AAD prefixes,
+  footer keys, and column-specific keys.
+- Ported split-block bloom filter writing, reading, and equality pruning with
+  parquet-mr interoperability coverage.
+- Ported spec-compliant page index writing and public page index reading APIs,
+  including encrypted indexes and selective page reads.
+- Added decryption-aware `ParquetReader.ReadSchemaAsync` overloads.
+- Reject unknown encryption column paths and mismatched stored AAD prefixes
+  instead of silently weakening file identity or confidentiality.
+- Build the parquet-mr encryption inspector from pinned source during CI and
+  run the encryption interoperability suite on Linux, macOS, and Windows.
+
 ## Breaking changes
-- The compression level changed from `SmallestSize` to `Optimal` for the default level like it was in v5. Thanks to @svenclaesson
-for pointing this out in #765.
+
+- The fork now targets .NET 8 and .NET 10. The previous fork-only .NET
+  Framework 4.8 target has been removed.
+- The default compression level changed from `SmallestSize` to `Optimal`, as it
+  was in v5. Thanks to @svenclaesson for pointing this out in #765.
 
 # 6.1.0
 
