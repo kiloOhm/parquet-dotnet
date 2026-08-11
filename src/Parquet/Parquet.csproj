@@ -3,7 +3,7 @@
     <PropertyGroup>
         <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
         <Company></Company>
-        <PackageId>Parquet.Net</PackageId>
+        <PackageId>kiloOhm.Parquet.Net</PackageId>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
@@ -22,11 +22,11 @@
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-        <Authors>Ivan Gavryliuk (@aloneguid)</Authors>
+        <Authors>Ivan Gavryliuk (@aloneguid), Lukas Wicke (@kiloOhm)</Authors>
         <Product />
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <PackageProjectUrl>https://github.com/aloneguid/parquet-dotnet</PackageProjectUrl>
-        <RepositoryUrl>https://github.com/aloneguid/parquet-dotnet</RepositoryUrl>
+        <PackageProjectUrl>https://github.com/kiloOhm/parquet-dotnet</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/kiloOhm/parquet-dotnet</RepositoryUrl>
         <RepositoryType>GitHub</RepositoryType>
         <PackageIcon>icon.png</PackageIcon>
         <Description>Fully managed Apache Parquet implementation.</Description>
