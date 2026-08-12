@@ -1,4 +1,4 @@
-# 6.1.1-pre.1
+# 6.1.1-pre.2
 
 Prerelease of the forked `kiloOhm.Parquet.Net` and
 `kiloOhm.Parquet.Net.Data.Analysis` packages, based on upstream 6.1.0.
@@ -17,6 +17,8 @@ Prerelease of the forked `kiloOhm.Parquet.Net` and
   instead of silently weakening file identity or confidentiality.
 - Build the parquet-mr encryption inspector from pinned source during CI and
   run the encryption interoperability suite on Linux, macOS, and Windows.
+- Restored page-index scanning as a fallback when persisted footer indexes are
+  absent, including encrypted columns and incomplete page statistics.
 
 ## Breaking changes
 
