@@ -1,4 +1,4 @@
-# 6.1.1-pre.3
+# 6.1.1-pre.4
 
 Prerelease of the forked `kiloOhm.Parquet.Net` and
 `kiloOhm.Parquet.Net.Data.Analysis` packages, based on upstream 6.1.0.
@@ -21,6 +21,9 @@ Prerelease of the forked `kiloOhm.Parquet.Net` and
   absent, including encrypted columns and incomplete page statistics.
 - Encryption key retrievers now receive the physical column path during column
   key resolution, while preserving compatibility with metadata-only retrievers.
+- Added `ParquetFooter.UpdateCustomMetadataAsync` for updating footer metadata
+  without rewriting row groups, including authenticated encrypted and signed
+  plaintext footers.
 
 ## Breaking changes
 
