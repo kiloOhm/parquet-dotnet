@@ -1,4 +1,4 @@
-# 6.1.1-pre.2
+# 6.1.1-pre.3
 
 Prerelease of the forked `kiloOhm.Parquet.Net` and
 `kiloOhm.Parquet.Net.Data.Analysis` packages, based on upstream 6.1.0.
@@ -19,6 +19,8 @@ Prerelease of the forked `kiloOhm.Parquet.Net` and
   run the encryption interoperability suite on Linux, macOS, and Windows.
 - Restored page-index scanning as a fallback when persisted footer indexes are
   absent, including encrypted columns and incomplete page statistics.
+- Encryption key retrievers now receive the physical column path during column
+  key resolution, while preserving compatibility with metadata-only retrievers.
 
 ## Breaking changes
 
