@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -62,6 +63,65 @@ public class WriterPageIndexTest {
     }
 
     [Fact]
+    public async Task ScansPageIndexesWhenFooterReferencesAreMissing() {
+        var field = new DataField<int>("value");
+        using MemoryStream stream = await WriteAsync(field, [10, 20, 30, 40, 50], new ParquetOptions {
+            DataPageRowCountLimit = 2
+        });
+
+        await using ParquetReader reader = await ParquetReader.CreateAsync(stream);
+        ColumnChunk columnChunk = reader.Metadata!.RowGroups[0].Columns[0];
+        columnChunk.OffsetIndexOffset = null;
+        columnChunk.OffsetIndexLength = null;
+        columnChunk.ColumnIndexOffset = null;
+        columnChunk.ColumnIndexLength = null;
+
+        using ParquetRowGroupReader rowGroup = reader.OpenRowGroupReader(0);
+        Assert.Null(rowGroup.GetOffsetIndex(field));
+        Assert.Null(rowGroup.GetColumnIndex(field));
+        stream.Position = 7;
+
+        OffsetIndex offsetIndex = await rowGroup.GetOrCreateOffsetIndexAsync(field);
+        ColumnIndex columnIndex = Assert.IsType<ColumnIndex>(
+            await rowGroup.GetOrCreateColumnIndexAsync(field));
+
+        Assert.Equal(7, stream.Position);
+        Assert.Equal([0L, 2L, 4L], offsetIndex.PageLocations.Select(page => page.FirstRowIndex));
+        Assert.Equal(3, columnIndex.MinValues.Count);
+        Assert.Equal(3, columnIndex.MaxValues.Count);
+        Assert.Equal([0L, 0L, 0L], columnIndex.NullCounts);
+    }
+
+    [Fact]
+    public async Task ScansRepeatedPageRowBoundaries() {
+        var schema = new ParquetSchema(new DataField<IEnumerable<int>>("value"));
+        DataField field = schema.DataFields[0];
+        using var stream = new MemoryStream();
+        await using(ParquetWriter writer = await ParquetWriter.CreateAsync(
+            schema,
+            stream,
+            new ParquetOptions { DataPageRowCountLimit = 1 })) {
+            using ParquetRowGroupWriter rowGroup = writer.CreateRowGroup();
+            await rowGroup.WriteAsync<int>(
+                field,
+                new int[] { 10, 20, 30, 40, 50 },
+                new int[] { 0, 1, 1, 0, 1 });
+            rowGroup.CompleteValidate();
+        }
+        stream.Position = 0;
+
+        await using ParquetReader reader = await ParquetReader.CreateAsync(stream);
+        ColumnChunk columnChunk = reader.Metadata!.RowGroups[0].Columns[0];
+        columnChunk.OffsetIndexOffset = null;
+        columnChunk.OffsetIndexLength = null;
+
+        using ParquetRowGroupReader rowGroupReader = reader.OpenRowGroupReader(0);
+        OffsetIndex offsetIndex = await rowGroupReader.GetOrCreateOffsetIndexAsync(field);
+
+        Assert.Equal([0L, 1L], offsetIndex.PageLocations.Select(page => page.FirstRowIndex));
+    }
+
+    [Fact]
     public async Task EncryptsPageIndexesWithTheColumnContext() {
         var field = new DataField<int>("value");
         var encryption = new ParquetEncryptionOptions(new ParquetKey(Key)) {
@@ -90,6 +150,39 @@ public class WriterPageIndexTest {
         await using ParquetReader wrongReader = await ParquetReader.CreateAsync(stream, wrongOptions);
         using ParquetRowGroupReader wrongRowGroup = wrongReader.OpenRowGroupReader(0);
         Assert.Throws<AuthenticationTagMismatchException>(() => wrongRowGroup.GetOffsetIndex(field));
+    }
+
+    [Fact]
+    public async Task ScansEncryptedPageIndexesWhenFooterReferencesAreMissing() {
+        var field = new DataField<int>("value");
+        var encryption = new ParquetEncryptionOptions(new ParquetKey(Key)) {
+            EncryptFooter = false,
+            EncryptAllColumns = false
+        };
+        encryption.ColumnKeys[field.Path.ToString()] = new ParquetKey(ColumnKey);
+        using MemoryStream stream = await WriteAsync(
+            field,
+            [1, 2, 3, 4],
+            new ParquetOptions { DataPageRowCountLimit = 2, Encryption = encryption });
+
+        var readOptions = new ParquetOptions {
+            Decryption = new ParquetDecryptionOptions { FooterKey = Key }
+        };
+        readOptions.Decryption.ColumnKeys[field.Path.ToString()] = ColumnKey;
+        await using ParquetReader reader = await ParquetReader.CreateAsync(stream, readOptions);
+        ColumnChunk columnChunk = reader.Metadata!.RowGroups[0].Columns[0];
+        columnChunk.OffsetIndexOffset = null;
+        columnChunk.OffsetIndexLength = null;
+        columnChunk.ColumnIndexOffset = null;
+        columnChunk.ColumnIndexLength = null;
+
+        using ParquetRowGroupReader rowGroup = reader.OpenRowGroupReader(0);
+        OffsetIndex offsetIndex = await rowGroup.GetOrCreateOffsetIndexAsync(field);
+        ColumnIndex columnIndex = Assert.IsType<ColumnIndex>(
+            await rowGroup.GetOrCreateColumnIndexAsync(field));
+
+        Assert.Equal([0L, 2L], offsetIndex.PageLocations.Select(page => page.FirstRowIndex));
+        Assert.Equal(2, columnIndex.MinValues.Count);
     }
 
     private static async Task<MemoryStream> WriteAsync(
